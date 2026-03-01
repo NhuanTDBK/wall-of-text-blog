@@ -1,0 +1,158 @@
+---
+title: 'Vibe Coding Part 3: From Code to Production with Terraform'
+date: '2026-03-03'
+tags: ['vibe-coding', 'claude-code', 'terraform', 'deployment', 'AWS']
+draft: false
+summary: 'The final step of vibe coding: deploying a hobby project to AWS with Terraform and automated scripts — because a side project that only runs on localhost is just a demo.'
+authors: ['default']
+---
+
+# Vibe Coding Part 3: From Code to Production with Terraform
+
+This is **Part 3** of a 3-part series on vibe coding. [Part 1](/blog/vibe-coding-part-1) covers going from idea to spec. [Part 2](/blog/vibe-coding-part-2) covers breaking the spec into epics with BMAD.
+
+---
+
+## The Last Mile Problem
+
+Most side projects never make it to production. You build something locally, it works on your machine, and then the energy drains out. Deployment feels like a whole separate project — unfamiliar tools, cloud console clicking, environment variable juggling, "why doesn't it work on the server?"
+
+This is where vibe coding earns its keep. If AI can help you brainstorm, spec, and build — it can help you deploy too. And with Terraform, deployment becomes just another piece of code that Claude Code can help you write.
+
+In Parts 1 and 2, I went from a vague idea to a full product spec to 9 epics with 30+ stories. The code was working locally with Docker Compose — a Telegram bot serving AI-powered HN summaries to my phone. Now I needed it running 24/7 on a real server.
+
+## Why Terraform for a Hobby Project?
+
+Three reasons:
+
+**Reproducibility.** Click-ops in the AWS console is fine until you need to recreate your setup. With Terraform, the entire infrastructure is defined in a handful of `.tf` files. Blow it all away, run `terraform apply`, and you're back.
+
+**Cost control.** `terraform destroy` tears down everything. When I'm not actively developing, I destroy the EC2 instance and stop paying. When Tet holiday is over and I want to tinker on a weekend, `terraform apply` brings it all back in minutes.
+
+**AI-friendliness.** Terraform's HCL syntax is declarative and well-documented — exactly the kind of thing LLMs handle well. I described what I wanted in plain English. Claude Code wrote the Terraform. I reviewed and applied.
+
+## The AWS Architecture
+
+The deployed architecture is deliberately simple. This is a hobby project, not a startup:
+
+```
+┌─────────────────────────────────────┐
+│  AWS VPC (10.0.0.0/16)              │
+│                                      │
+│  ┌─────────────────────────────┐    │
+│  │  EC2 (t3.small)             │    │
+│  │                              │    │
+│  │  Docker Compose:             │    │
+│  │  ├── PostgreSQL              │    │
+│  │  ├── Redis                   │    │
+│  │  ├── Post Collector (hourly) │    │
+│  │  ├── Crawler                 │    │
+│  │  ├── Summarizer (30 min)     │    │
+│  │  ├── Delivery Daemon         │    │
+│  │  └── Telegram Bot            │    │
+│  │                              │    │
+│  │  Local Storage:              │    │
+│  │  └── RocksDB (articles)      │    │
+│  └─────────────────────────────┘    │
+│                                      │
+│  ┌──────────┐                        │
+│  │  S3      │ (backups)              │
+│  └──────────┘                        │
+└─────────────────────────────────────┘
+        │
+        │ Telegram Bot API
+        ▼
+   Users on Telegram
+```
+
+Everything runs on a single EC2 instance. PostgreSQL and Redis run as Docker containers alongside the application. Is this production-grade? No. Does it need to be? Also no. It serves one user (me) reliably, and that's the whole point.
+
+The Terraform code defines five resources: a VPC with a public subnet, an internet gateway with routing, a security group (SSH + app ports), an IAM role for S3 access, and the EC2 instance itself. About 200 lines of HCL total.
+
+## The Deployment Script
+
+The real magic is the deployment script. I asked Claude Code to help me write a single `deploy-auto.sh` that handles the full flow:
+
+1. Run `terraform apply` to provision (or update) infrastructure
+2. Resolve the EC2 instance's public IP from Terraform outputs
+3. Sync the `.env` file to the server (secrets, API keys)
+4. SSH in, pull the latest code, run database migrations with Alembic
+5. Start Docker Compose with all services
+
+The script supports flags for common scenarios: `--skip-infra` when you just want to update code without touching Terraform, `--skip-migrations` for changes that don't touch the database, and `--branch` to deploy a specific git branch.
+
+One command. Thirty seconds of waiting. The bot is live. That's the experience I wanted.
+
+## Claude Code for Infrastructure
+
+Writing Terraform from scratch is where Claude Code shines brightest — perhaps even more than application code. Here's why:
+
+**Infrastructure code is declarative.** You describe the desired state. There's one right way to define a VPC, a subnet, a security group. LLMs have seen thousands of Terraform examples in training data. The output is reliable.
+
+**Debugging is conversational.** AWS permission errors are notoriously cryptic. When `terraform apply` fails because an IAM policy is missing a permission, I paste the error into Claude Code. It reads the error, identifies the missing permission, and suggests the fix. What used to be a 30-minute Stack Overflow expedition becomes a 2-minute conversation.
+
+**Security gets a second pair of eyes.** Claude Code flagged when my security group was too permissive and when my IAM role had more permissions than needed. These are exactly the kind of mistakes you make at 11pm and regret in production.
+
+The deployment script (`deploy-auto.sh`) was also largely AI-written. Shell scripting is another area where LLMs excel — the patterns are well-established, and Claude Code generates scripts with proper error handling, set -e, informative echo statements, and clean flag parsing.
+
+## Docker Compose in Production
+
+The application runs as 7 containers orchestrated by Docker Compose:
+
+- **PostgreSQL** — structured data (users, posts, summaries, deliveries)
+- **Redis** — caching and bot state management
+- **Post Collector** — hourly HN API polling
+- **Crawler** — content extraction from article URLs
+- **Summarizer** — AI summarization every 30 minutes
+- **Delivery Daemon** — scheduled digest delivery to users
+- **Telegram Bot** — the user-facing interface
+
+Each background worker is a simple Python script with an APScheduler loop. They share the same codebase and database but run as independent processes. If the summarizer crashes, the bot keeps working. If the crawler falls behind, deliveries continue with whatever content is available.
+
+Alembic handles database migrations. The deploy script runs `alembic upgrade head` before starting services, so schema changes apply automatically on each deploy.
+
+## Cost Reality
+
+Running a hobby project in the cloud has real costs. Here's what HN Pal actually costs:
+
+- **EC2 (t3.small):** ~$15/month
+- **OpenAI API:** $2-5/day with prompt caching (without caching, it would be $20-50/day)
+- **Domain + misc:** ~$1/month
+
+The prompt caching optimization was critical. By structuring the summarization agent with a fixed system prompt, OpenAI caches it across requests. Cache hits are charged at 10% of the normal rate. For batch summarization of 30 posts — where the system prompt is identical every time — this cuts costs by 90%.
+
+Langfuse tracks every LLM call with token counts and cost. I can see exactly how much each summarization run costs and catch anomalies early. Observability isn't just for big teams.
+
+And the beauty of Terraform: when I'm done experimenting, `terraform destroy` stops all costs immediately. No forgotten EC2 instances burning money.
+
+## The Complete Vibe Coding Loop
+
+Looking back at the full journey:
+
+**Day 1:** Brainstormed with Claude Code. Produced a spec and PRD. (Part 1)
+
+**Day 2:** Used BMAD to break the spec into 9 epics and 30+ stories. Planned 6 sprints. (Part 2)
+
+**Days 3-14:** Implemented Epics 1-4 and 7-9 with Claude Code. Each story followed the plan-review-implement loop. (The actual building)
+
+**Day 14:** Deployed to AWS with Terraform. Bot went live. (Part 3)
+
+Two weeks. One person. One AI copilot. A production Telegram bot that polls HackerNews hourly, summarizes the top stories with AI, and delivers personalized digests with interactive buttons.
+
+## The Vibe Coding Philosophy
+
+If I had to distill vibe coding into a set of principles:
+
+**AI doesn't replace thinking — it removes friction.** The ideas are yours. The architecture decisions are yours. AI handles the tedious translation from intent to implementation.
+
+**Spec before code, always.** Even for side projects. Especially for side projects. You don't have a team to keep you on track. The spec is your team.
+
+**Plan mode is underrated.** The most valuable thing Claude Code does isn't writing code — it's the plan mode conversation before writing code. "Here's what I'm going to do and why" prevents more bugs than any test suite.
+
+**Deploy early, deploy with code.** Terraform makes infrastructure as reviewable and version-controlled as your application. Don't save deployment for last. It's part of the project.
+
+**Side projects are the perfect playground.** Low stakes. Full ownership. No code review bottlenecks. This is where you learn how to work with AI effectively — and then bring those skills to your day job.
+
+The bot is running. My phone buzzes every morning with a curated HN digest. It took two weeks and cost less than a nice dinner.
+
+That's the vibe.

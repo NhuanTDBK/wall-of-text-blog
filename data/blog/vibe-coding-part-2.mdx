@@ -1,0 +1,131 @@
+---
+title: 'Vibe Coding Part 2: From Spec to Epics with BMAD Method'
+date: '2026-03-02'
+tags: ['vibe-coding', 'claude-code', 'project-management', 'BMAD']
+draft: false
+summary: 'Using the BMAD method with Claude Code to break a product spec into 9 epics, 30+ user stories, and a sprint plan — turning a big idea into shippable chunks.'
+authors: ['default']
+---
+
+# Vibe Coding Part 2: From Spec to Epics with BMAD Method
+
+This is **Part 2** of a 3-part series on vibe coding. [Part 1](/blog/vibe-coding-part-1) covers going from idea to spec. [Part 3](/blog/vibe-coding-part-3) covers deploying to AWS with Terraform.
+
+---
+
+## The Gap Between Spec and Code
+
+In Part 1, I ended up with a 33KB product spec and a 40KB PRD for HN Pal — my AI-powered HackerNews digest bot. Comprehensive documents. Clear vision. Zero lines of code.
+
+This is where most side projects stall. You have a grand plan. You open your editor. You stare at an empty `main.py`. Where do you even start?
+
+The answer, counterintuitively, is **more planning** — but the right kind. Not more documents. A breakdown. Turning one big thing into many small things, each small enough to build in a single sitting.
+
+This is where the BMAD method comes in.
+
+## What Is BMAD?
+
+BMAD stands for **BMad Agentic Development**. It's a methodology designed for AI-assisted development where you ask AI to take on specialized roles during planning:
+
+- **Product Owner** — writes user stories with acceptance criteria
+- **Scrum Master** — plans sprints, identifies dependencies, manages scope
+- **Architect** — designs technical approach, chooses patterns
+- **Developer** — estimates effort, flags implementation risks
+
+You're still the decision-maker. But instead of doing all of these roles yourself (which is what solo developers do, poorly), you have Claude Code play each role and produce structured outputs.
+
+The key idea: **spec → epics → stories → tasks**. Each level is more concrete and more actionable than the last.
+
+## Breaking Into Epics
+
+I gave Claude Code the full spec and asked it to break the project into epics — major feature areas that could each be built and tested independently.
+
+What came back was 9 epics that mapped perfectly to the product's architecture:
+
+| Epic | Focus | Sprint |
+|------|-------|--------|
+| 1. Ingest Pipeline | Poll HN, crawl URLs, store content | Sprint 1 |
+| 2. Summarization & LLM | OpenAI agents, 5 prompt styles | Sprint 2 |
+| 3. Telegram Bot Foundation | Bot setup, commands, delivery | Sprint 3 |
+| 4. Interactive Elements | Inline buttons, save, react | Sprint 4 |
+| 5. Discussion System | AI conversations about articles | Sprint 5 |
+| 6. Memory System | Learn user interests over time | Sprint 6 |
+| 7. AWS Deployment | Terraform, EC2, production infra | Sprint 4-5 |
+| 8. Feedback Tracking | User activity logging | Sprint 5 |
+| 9. Inline Button Refresh | UI refinements | Sprint 6 |
+
+The dependency chain was clear:
+
+```
+Epic 1 → Epic 2 → Epic 3 → Epic 4
+                                ↓
+                   Epic 5 → Epic 6
+```
+
+Epics 1 through 4 formed the **critical path** — the minimum needed for a working product. Epics 5 and 6 were enhancements. Epic 7 (deployment) could happen in parallel once the code was stable.
+
+This structure gave me something I never have on side projects: **the ability to stop at a known-good point.** After Epic 4, I'd have a working bot. Everything after was bonus.
+
+## Writing User Stories
+
+Epics tell you *what* to build. Stories tell you *how to know when it's done.*
+
+I had Claude Code play Product Owner and write detailed user stories for each epic. Here's what a real story looked like for Epic 2 (Summarization):
+
+**Story 2.1: OpenAI Agents SDK Integration**
+- As a developer, I want to integrate the OpenAI Agents SDK so that summarization uses a structured agent framework
+- Acceptance criteria: agent initializes with system prompt, handles token tracking, integrates with Langfuse for observability
+- Technical notes: use `gpt-4o-mini` as default model for cost efficiency
+
+**Story 2.2: Summarization Prompt Engineering**
+- As a user, I want to choose my summary style so that I get digests tailored to my reading preference
+- Acceptance criteria: 5 prompt variants implemented (basic, technical, business, concise, personalized), each variant passes LLM-as-judge evaluation at 80%+ quality
+
+Each story had clear acceptance criteria — not vague descriptions, but testable conditions. This matters because when you're building at speed with AI assistance, it's easy to call something "done" when it's actually "sort of working." Acceptance criteria keep you honest.
+
+The full project had 30+ stories across the 9 epics, each in its own markdown file in the `docs/stories/` directory. Sounds like a lot of overhead. In practice, Claude Code generated all of them in about an hour, and they saved me far more time during implementation.
+
+## Sprint Planning
+
+With epics and stories defined, Claude Code (playing Scrum Master) organized a 12-week sprint plan:
+
+- **Sprints 1-2:** Core data pipeline (ingest + summarization)
+- **Sprints 3-4:** User-facing product (bot + interactive elements)
+- **Sprints 5-6:** Intelligence and polish (discussions, memory, deployment)
+
+The critical insight from sprint planning was **identifying what I could skip.** Epic 5 (Discussion System) and Epic 6 (Memory System) were the most complex features — and they were post-MVP. When Tet holiday ended and my time got tight, I knew exactly which epics to defer without breaking anything.
+
+In practice, I completed Epics 1-4 plus 7-9 in about two weeks of focused holiday coding. Epics 5 and 6 are documented and ready for when I pick the project back up. That's the power of planning: **you can stop at any sprint boundary and still have a working product.**
+
+## The Claude Code Workflow
+
+Here's the development loop that made this practical, not theoretical:
+
+**1. AGENTS.md as persistent context.** I wrote an `AGENTS.md` file at the project root — a guide that tells Claude Code about the project's architecture, conventions, and current state. Every time I start a new Claude Code session, it reads this file and has full context. No re-explaining.
+
+**2. Plan mode before implementation.** For each story, I'd enter Claude Code's plan mode. It would read the story's acceptance criteria, explore the existing codebase, and propose an implementation approach. I'd review, adjust, approve — then it would execute.
+
+**3. The story-activity-implementation loop:**
+- Pick a story from the sprint
+- Claude Code reads the story and proposes an activity plan
+- Review and approve the plan
+- Claude Code implements, testing against acceptance criteria
+- Mark story complete, move to next
+
+This loop is where "vibe coding" becomes real. Each cycle takes 30-60 minutes for a well-scoped story. You're making decisions, not writing boilerplate. You're reviewing architecture, not debugging typos. The boring parts go fast. The interesting parts get your full attention.
+
+## Why This Matters for Side Projects
+
+Most side project advice says "just start building." I disagree. The failure mode of side projects isn't starting — it's **losing momentum**. You hit a design decision, you're not sure what to do, you close the laptop. Three months later, you've forgotten all context.
+
+BMAD with Claude Code solves this in three ways:
+
+1. **All decisions are documented.** When you come back after a break, the stories and activity docs tell you exactly where you left off and what to do next.
+
+2. **Scope is explicit.** You know what MVP is (Epics 1-4) and what's a nice-to-have (Epics 5-6). No scope creep anxiety.
+
+3. **AI plays the roles you don't have.** Solo developers are bad product managers. They're bad scrum masters. That's fine — Claude Code can play those roles well enough to keep you organized.
+
+The total time I spent on planning — brainstorming, spec, epics, stories, sprint plan — was about 4-5 hours. The implementation that followed took roughly 60-70 hours over two weeks. Without the planning, I'm confident the implementation would have taken 3-4x longer, with more dead ends and more rewriting.
+
+In [Part 3](/blog/vibe-coding-part-3), I'll cover the final step: deploying HN Pal to AWS with Terraform — because a side project that only runs on localhost is just a demo.

@@ -1,0 +1,104 @@
+---
+title: 'Vibe Coding Part 1: From Idea to Spec with Claude Code'
+date: '2026-03-01'
+tags: ['vibe-coding', 'claude-code', 'AI', 'side-project']
+draft: false
+summary: 'How I used Claude Code to brainstorm, shape, and spec out a hobby project during Tet holiday — going from a vague idea to a 30-page product spec in one sitting.'
+authors: ['default']
+---
+
+# Vibe Coding Part 1: From Idea to Spec with Claude Code
+
+This is **Part 1** of a 3-part series on vibe coding. [Part 2](/blog/vibe-coding-part-2) covers breaking the spec into epics with BMAD. [Part 3](/blog/vibe-coding-part-3) covers deploying to AWS with Terraform.
+
+---
+
+## What Is Vibe Coding?
+
+Vibe coding is not about letting AI write your code while you watch. It's about using AI as a **thinking partner** across the entire development lifecycle — from brainstorming to architecture to implementation to deployment. You bring the vision and domain knowledge. AI brings speed, breadth, and tireless iteration.
+
+The term gets thrown around a lot, but for me it means something specific: **spec-driven development with AI at every step**. You don't just prompt an LLM to "build me a todo app." You have a conversation. You challenge ideas. You produce artifacts — specs, plans, stories — that guide the work. The AI accelerates your thinking, not replaces it.
+
+During Tet holiday 2026, I had two weeks off and a nagging problem I wanted to solve. What followed was the most productive side project sprint I've ever had: from a vague idea to a production Telegram bot serving daily HackerNews summaries — all built with Claude Code as my copilot.
+
+## The Genesis Idea
+
+Like many engineers, I'm a chronic HackerNews reader. I open dozens of tabs, skim headlines, save links I'll "read later" (I won't), and feel vaguely guilty about the whole thing. The signal-to-noise ratio is terrible when you're scrolling during lunch.
+
+What I actually wanted was simple: **someone to read HN for me and send me the good stuff, summarized, straight to Telegram.** No apps to open. No feeds to manage. Just a daily message with the posts worth reading.
+
+That was the whole idea. Three sentences. But turning three sentences into something buildable — that's where the work begins.
+
+## Brainstorming with Claude Code
+
+Instead of opening a blank document and staring at it, I opened Claude Code and started talking.
+
+The first prompt was something like: *"I want to build a bot that sends me daily HackerNews summaries. Help me think through how to build this."*
+
+What followed was a 30-minute conversation that covered more ground than I would have in a week of solo thinking:
+
+**Delivery channel.** Email? Slack? Telegram? Discord? Claude laid out tradeoffs for each. I picked Telegram — it's where I already live, it supports rich formatting, and the bot API is mature. Good choice, as it turned out.
+
+**Content extraction.** HN links point to random websites. How do you get clean article text from arbitrary URLs? Claude suggested trafilatura for HTML-to-text extraction and markitdown for Markdown conversion. I hadn't heard of either. Both turned out to be excellent.
+
+**Summarization approach.** Direct API calls vs. agent framework? Claude walked me through the OpenAI Agents SDK — a structured way to define agents with system prompts, tools, and guardrails. More setup upfront, but much cleaner than raw API calls when you need multiple summarization styles.
+
+**Storage.** Do you need a database? What kind? The conversation landed on PostgreSQL for structured data (users, posts, deliveries) and RocksDB for raw content (HTML, Markdown files). This dual-storage pattern saved me from bloating my relational DB with megabytes of article text.
+
+The key insight: **I wasn't just getting answers. I was discovering questions I hadn't thought to ask.** Claude would say "have you considered how you'll handle paywalled sites?" or "what happens when the HN API rate-limits you?" — and suddenly my design space got bigger and more realistic.
+
+## Developing the Feature Set
+
+What started as "send me summaries" grew into a surprisingly rich product through this brainstorming process. Features I never planned emerged naturally from the conversation:
+
+**Five summary styles.** Why send everyone the same summary? Some people want technical depth, others want a business angle, others just want two sentences. Claude suggested offering variants: basic, technical, business, concise, and personalized. Each uses a different system prompt tuned for that audience.
+
+**Interactive buttons.** Telegram supports inline keyboards. Instead of just dumping text, each summary could have buttons: "Show More" for the full summary, "Save" to bookmark, reactions for feedback. This turned passive reading into an interactive experience.
+
+**A discussion system.** The most ambitious idea: what if you could tap "Discuss" on any summary and have a conversation with an AI agent that has read the full article? Like having a knowledgeable friend to bounce ideas off.
+
+**A memory system.** If the bot tracks what you save, react to, and discuss — it can learn your interests and personalize future summaries. Not just "show me AI articles" but understanding that you care about distributed systems **applied to real products**, not academic papers.
+
+The architecture that emerged looked like four interconnected pipelines:
+
+```
+Ingest → Summarize → Memory → Bot
+(poll HN)  (LLM)    (learn)  (deliver)
+```
+
+Each pipeline runs independently on its own schedule. Ingest runs hourly. Summarization every 30 minutes. Delivery on a user-configured schedule. Clean separation of concerns.
+
+## Writing the Spec
+
+Here's where vibe coding diverges from "just prompting." Instead of jumping to code, I asked Claude Code to help me write a **proper product specification**. Not a README. Not a todo list. A spec.
+
+We iterated on it together. I'd describe a feature in plain language. Claude would formalize it — define data models, specify API contracts, document edge cases. I'd push back on over-engineering. Claude would flag gaps in my thinking.
+
+The result was a 33KB spec document (`spec.md`) covering:
+- Component responsibilities with a system architecture diagram
+- Database schema for 8 tables (posts, users, summaries, deliveries, conversations, agent_calls, user_token_usage, user_activity_log)
+- Content extraction pipeline with fallback strategies
+- Summarization prompt templates and token budgets
+- Bot command reference and state machine transitions
+
+We also produced a 40KB product requirements document (`prd.md`) that captured the "why" behind every feature decision.
+
+Was this overkill for a side project? Maybe. But here's what I learned: **the spec became the source of truth for every implementation decision that followed.** When I was deep in code at 2am wondering "should the bot send one message per post or batch them?" — the answer was already in the spec. No guessing. No re-deciding.
+
+## What I Took Away
+
+After one afternoon of brainstorming with Claude Code, I had:
+- A clear product vision with defined scope
+- A technical architecture with justified technology choices
+- Two comprehensive documents (spec + PRD) totaling 73KB
+- A feature set that was ambitious but achievable
+
+Three tips if you want to try this yourself:
+
+1. **Start with your pain point, not the technology.** "I waste too much time on HN" is a better starting point than "I want to build something with FastAPI."
+
+2. **Let AI challenge your assumptions.** When Claude asks "have you considered X?" — don't dismiss it. That's the whole point of having a thinking partner.
+
+3. **Write the spec before the code.** It feels slow. It isn't. A good spec saves you from rewriting code when you realize your data model doesn't support the feature you forgot about.
+
+In [Part 2](/blog/vibe-coding-part-2), I'll show how I used the BMAD method with Claude Code to break this spec into 9 epics, 30+ user stories, and a sprint plan — turning a big document into shippable chunks of work.
