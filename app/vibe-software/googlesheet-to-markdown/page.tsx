@@ -81,11 +81,7 @@ function convertToMarkdown(input: string): string {
   })
 
   // Collapse internal newlines to a space and escape pipes
-  const escape = (cell: string) =>
-    cell
-      .trim()
-      .replace(/\r?\n/g, ' ')
-      .replace(/\|/g, '\\|')
+  const escape = (cell: string) => cell.trim().replace(/\r?\n/g, ' ').replace(/\|/g, '\\|')
 
   const header = `| ${normalized[0].map(escape).join(' | ')} |`
   const separator = `| ${Array(colCount).fill('---').join(' | ')} |`
@@ -117,7 +113,7 @@ export default function GoogleSheetToMarkdown() {
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       {/* Header bar */}
-      <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 px-6 py-3 shrink-0">
+      <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-6 py-3 dark:border-gray-700">
         <div>
           <h1 className="text-lg font-bold text-gray-900 dark:text-gray-100">
             Google Sheet → Markdown
@@ -130,7 +126,7 @@ export default function GoogleSheetToMarkdown() {
           {input && (
             <button
               onClick={handleClear}
-              className="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
+              className="text-sm text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
             >
               Clear
             </button>
@@ -138,19 +134,29 @@ export default function GoogleSheetToMarkdown() {
           <button
             onClick={handleCopy}
             disabled={!output}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="bg-primary-500 hover:bg-primary-600 inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-40"
           >
             {copied ? (
               <>
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M5 13l4 4L19 7"
+                  />
                 </svg>
                 Copied!
               </>
             ) : (
               <>
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                  />
                 </svg>
                 Copy Markdown
               </>
@@ -160,16 +166,16 @@ export default function GoogleSheetToMarkdown() {
       </div>
 
       {/* Main panels */}
-      <div className="flex flex-1 overflow-hidden divide-x divide-gray-200 dark:divide-gray-700">
+      <div className="flex flex-1 divide-x divide-gray-200 overflow-hidden dark:divide-gray-700">
         {/* Left: Input */}
-        <div className="flex flex-col w-1/2 overflow-hidden">
-          <div className="px-4 py-2 shrink-0 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-            <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+        <div className="flex w-1/2 flex-col overflow-hidden">
+          <div className="shrink-0 border-b border-gray-200 bg-gray-50 px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
+            <span className="text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400">
               Paste from Google Sheets
             </span>
           </div>
           <textarea
-            className="flex-1 w-full px-4 py-3 font-mono text-sm text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-900 placeholder-gray-400 focus:outline-none resize-none"
+            className="w-full flex-1 resize-none bg-white px-4 py-3 font-mono text-sm text-gray-900 placeholder-gray-400 focus:outline-none dark:bg-gray-900 dark:text-gray-100"
             placeholder="Select and copy cells from Google Sheets (Ctrl+C / Cmd+C), then paste here..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -178,16 +184,16 @@ export default function GoogleSheetToMarkdown() {
         </div>
 
         {/* Right: Output + Preview stacked */}
-        <div className="flex flex-col w-1/2 overflow-hidden divide-y divide-gray-200 dark:divide-gray-700">
+        <div className="flex w-1/2 flex-col divide-y divide-gray-200 overflow-hidden dark:divide-gray-700">
           {/* Markdown output */}
-          <div className="flex flex-col h-1/2 overflow-hidden">
-            <div className="px-4 py-2 shrink-0 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-              <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+          <div className="flex h-1/2 flex-col overflow-hidden">
+            <div className="shrink-0 border-b border-gray-200 bg-gray-50 px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
+              <span className="text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400">
                 Markdown Table
               </span>
             </div>
             <textarea
-              className="flex-1 w-full px-4 py-3 font-mono text-sm text-gray-900 dark:text-gray-100 bg-gray-50 dark:bg-gray-800/50 focus:outline-none resize-none"
+              className="w-full flex-1 resize-none bg-gray-50 px-4 py-3 font-mono text-sm text-gray-900 focus:outline-none dark:bg-gray-800/50 dark:text-gray-100"
               readOnly
               value={output}
               placeholder="Your markdown table will appear here..."
@@ -195,9 +201,9 @@ export default function GoogleSheetToMarkdown() {
           </div>
 
           {/* Preview */}
-          <div className="flex flex-col h-1/2 overflow-hidden">
-            <div className="px-4 py-2 shrink-0 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-              <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+          <div className="flex h-1/2 flex-col overflow-hidden">
+            <div className="shrink-0 border-b border-gray-200 bg-gray-50 px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
+              <span className="text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400">
                 Preview
               </span>
             </div>
@@ -231,13 +237,13 @@ function MarkdownTablePreview({ markdown }: { markdown: string }) {
   const rows = lines.slice(2).map(parseRow)
 
   return (
-    <table className="min-w-full text-sm text-left">
+    <table className="min-w-full text-left text-sm">
       <thead>
         <tr className="border-b border-gray-200 dark:border-gray-700">
           {headers.map((h, i) => (
             <th
               key={i}
-              className="px-4 py-2 font-semibold text-gray-900 dark:text-gray-100 whitespace-nowrap"
+              className="px-4 py-2 font-semibold whitespace-nowrap text-gray-900 dark:text-gray-100"
             >
               {h}
             </th>
@@ -248,10 +254,10 @@ function MarkdownTablePreview({ markdown }: { markdown: string }) {
         {rows.map((row, ri) => (
           <tr
             key={ri}
-            className="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+            className="border-b border-gray-100 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-800/50"
           >
             {row.map((cell, ci) => (
-              <td key={ci} className="px-4 py-2 text-gray-700 dark:text-gray-300 whitespace-nowrap">
+              <td key={ci} className="px-4 py-2 whitespace-nowrap text-gray-700 dark:text-gray-300">
                 {cell}
               </td>
             ))}
