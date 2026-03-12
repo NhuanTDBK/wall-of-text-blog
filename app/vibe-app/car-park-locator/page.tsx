@@ -112,7 +112,10 @@ export default function CarParkLocator() {
   }, [])
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-start bg-gray-50 px-4 py-10 dark:bg-gray-950">
+    <div
+      className="flex min-h-dvh flex-col items-center justify-start bg-gray-50 px-4 pt-10 pb-10 dark:bg-gray-950"
+      style={{ paddingBottom: 'max(2.5rem, env(safe-area-inset-bottom))' }}
+    >
       <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg dark:bg-gray-900">
         {/* Header */}
         <div className="rounded-t-2xl bg-blue-600 px-6 py-5 text-white dark:bg-blue-700">

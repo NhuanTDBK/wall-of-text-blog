@@ -7,13 +7,17 @@ import { Analytics, AnalyticsConfig } from 'pliny/analytics'
 import ConditionalShell from './ConditionalShell'
 import siteMetadata from '@/data/siteMetadata'
 import { ThemeProviders } from './theme-providers'
-import { Metadata } from 'next'
+import { Metadata, Viewport } from 'next'
 
 const space_grotesk = Space_Grotesk({
   subsets: ['latin'],
   display: 'swap',
   variable: '--font-space-grotesk',
 })
+
+export const viewport: Viewport = {
+  viewportFit: 'cover',
+}
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteMetadata.siteUrl),

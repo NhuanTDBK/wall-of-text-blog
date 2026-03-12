@@ -7,7 +7,7 @@ import Footer from '@/components/Footer'
 import { SearchProvider, SearchConfig } from 'pliny/search'
 import siteMetadata from '@/data/siteMetadata'
 
-const FULL_SCREEN_PATHS = ['/vibe-software/googlesheet-to-markdown']
+const FULL_SCREEN_PATHS = ['/vibe-app/car-park-locator', '/vibe-app/googlesheet-to-markdown']
 
 export default function ConditionalShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
