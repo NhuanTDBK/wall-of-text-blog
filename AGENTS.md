@@ -36,10 +36,12 @@ next.config.js          # Next.js config (CSP, Permissions-Policy headers)
 ## Adding a New Vibe App
 
 1. **Create the route** at `app/vibe-app/[tool-name]/`:
+
    - `layout.tsx` — export `metadata` using `genPageMetadata` from `app/seo`
    - `page.tsx` — add `'use client'` at the top if the component uses hooks or browser APIs
 
 2. **Register the app** in `data/vibeAppData.ts`:
+
    ```ts
    {
      title: 'My Tool',
@@ -68,7 +70,7 @@ Security headers are configured in `next.config.js` under `securityHeaders`. Not
 
 ```bash
 yarn dev        # Start development server (http://localhost:3000)
-yarn build      # Production build
+yarn run build      # Production build
 yarn lint       # Run ESLint
 npx tsc --noEmit  # Type-check without building
 ```
@@ -76,23 +78,7 @@ npx tsc --noEmit  # Type-check without building
 ## Before Committing
 
 Always run a production build locally before pushing. Vercel runs `yarn run build` (based on the `yarn.lock` lockfile) during deployment — catch failures early:
-
-```bash
-yarn build
-```
-
 A successful build is required for deployment. Fix any type errors, lint errors, or build failures before committing.
-
-## General Vercel CLI Usage
-
-For general project deployment and management, the standard Vercel CLI is used:
-
-- **Installation**: Install the Vercel CLI globally: `npm i -g vercel`
-- **Local Development**: Run `vercel dev` within the project directory to simulate the Vercel production environment locally.
-- **Deployment**: Use `vercel deploy` (or just `vercel`) to deploy the project to Vercel.
-- **Building**: Run `vercel build` to build the project locally and generate build artifacts.
-
-> Note: Continuous deployment is handled automatically by Vercel's Git integration on push to `main`. The CLI is for manual or local use only.
 
 ## Conventional Commits
 
@@ -104,16 +90,16 @@ All commit messages must follow the [Conventional Commits](https://www.conventio
 
 **Types:**
 
-| Type | When to use |
-|------|-------------|
-| `feat` | New feature or vibe app |
-| `fix` | Bug fix |
-| `chore` | Maintenance, config, tooling (no production code change) |
-| `refactor` | Code restructure without behavior change |
-| `style` | Formatting, Tailwind class tweaks, no logic change |
-| `docs` | Documentation only (AGENTS.md, README, blog posts) |
-| `perf` | Performance improvement |
-| `test` | Adding or updating tests |
+| Type       | When to use                                              |
+| ---------- | -------------------------------------------------------- |
+| `feat`     | New feature or vibe app                                  |
+| `fix`      | Bug fix                                                  |
+| `chore`    | Maintenance, config, tooling (no production code change) |
+| `refactor` | Code restructure without behavior change                 |
+| `style`    | Formatting, Tailwind class tweaks, no logic change       |
+| `docs`     | Documentation only (AGENTS.md, README, blog posts)       |
+| `perf`     | Performance improvement                                  |
+| `test`     | Adding or updating tests                                 |
 
 **Examples:**
 
@@ -126,6 +112,7 @@ refactor(vibe-app): rename vibe-software to vibe-app
 ```
 
 **Rules:**
+
 - Use lowercase for type, scope, and summary
 - Keep the summary under 72 characters
 - Use imperative mood ("add", "fix", "remove" — not "added", "fixed", "removed")
