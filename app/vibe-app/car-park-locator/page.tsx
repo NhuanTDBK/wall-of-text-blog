@@ -87,7 +87,7 @@ export default function CarParkLocator() {
         <div className="space-y-5 px-6 py-6">
           {/* GPS Section */}
           <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
-            <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
+            <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">
               GPS Location
             </p>
             <button
@@ -118,15 +118,19 @@ export default function CarParkLocator() {
 
           {/* Manual Input Section */}
           <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
-            <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
+            <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">
               Parking Details
             </p>
             <div className="space-y-3">
               <div className="flex items-center gap-3">
-                <label className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300">
+                <label
+                  htmlFor="select-floor"
+                  className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
+                >
                   Floor
                 </label>
                 <select
+                  id="select-floor"
                   value={floor}
                   onChange={(e) => setFloor(e.target.value)}
                   className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
@@ -140,10 +144,14 @@ export default function CarParkLocator() {
               </div>
 
               <div className="flex items-center gap-3">
-                <label className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300">
+                <label
+                  htmlFor="select-zone"
+                  className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
+                >
                   Zone
                 </label>
                 <select
+                  id="select-zone"
                   value={zone}
                   onChange={(e) => setZone(e.target.value)}
                   className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
@@ -157,10 +165,14 @@ export default function CarParkLocator() {
               </div>
 
               <div className="flex items-center gap-3">
-                <label className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300">
+                <label
+                  htmlFor="input-slot"
+                  className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
+                >
                   Slot
                 </label>
                 <input
+                  id="input-slot"
                   type="text"
                   value={slot}
                   onChange={(e) => setSlot(e.target.value)}
@@ -183,7 +195,7 @@ export default function CarParkLocator() {
           {savedSpot && (
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-800 dark:bg-emerald-900/20">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-widest text-emerald-700 dark:text-emerald-400">
+                <p className="text-xs font-semibold tracking-widest text-emerald-700 uppercase dark:text-emerald-400">
                   Saved Spot
                 </p>
                 <button
