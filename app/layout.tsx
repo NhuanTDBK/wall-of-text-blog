@@ -37,6 +37,9 @@ export const metadata: Metadata = {
       'application/rss+xml': `${siteMetadata.siteUrl}/feed.xml`,
     },
   },
+  verification: {
+    google: '5tDzDyssgxP-Bz7TaWhgOnjJQpojVDf9obSbVyIg1tM',
+  },
   robots: {
     index: true,
     follow: true,
