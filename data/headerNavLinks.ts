@@ -3,7 +3,7 @@ const headerNavLinks = [
   { href: '/blog', title: 'Blog' },
   { href: '/tags', title: 'Tags' },
   { href: '/experience', title: 'Experience' },
-  { href: '/vibe-software', title: 'Vibe Software' },
+  { href: '/vibe-app', title: 'Vibe App' },
   { href: '/about', title: 'About' },
 ]
 
