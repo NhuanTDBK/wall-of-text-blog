@@ -118,20 +118,49 @@ export default function CarParkLocator() {
             </button>
 
             {gpsStatus === 'success' && gps && (
-              <div className="mt-3 rounded-lg bg-green-50 px-3 py-2 text-sm dark:bg-green-900/20">
-                <p className="font-mono text-green-700 dark:text-green-400">
-                  {gps.lat.toFixed(6)}, {gps.lng.toFixed(6)}
-                </p>
-                <p className="mt-0.5 text-xs text-green-600 dark:text-green-500">
-                  Accuracy: ±{gps.accuracy}m
-                </p>
-                {address ? (
-                  <p className="mt-1.5 text-xs text-green-700 dark:text-green-400">📍 {address}</p>
-                ) : GOOGLE_MAPS_API_KEY ? (
-                  <p className="mt-1.5 text-xs text-green-500 dark:text-green-600">
-                    Resolving address…
+              <div className="mt-3 space-y-2">
+                <div className="rounded-lg bg-green-50 px-3 py-2 text-sm dark:bg-green-900/20">
+                  <p className="font-mono text-green-700 dark:text-green-400">
+                    {gps.lat.toFixed(6)}, {gps.lng.toFixed(6)}
                   </p>
-                ) : null}
+                  <p className="mt-0.5 text-xs text-green-600 dark:text-green-500">
+                    Accuracy: ±{gps.accuracy}m
+                  </p>
+                  {address ? (
+                    <p className="mt-1.5 text-xs text-green-700 dark:text-green-400">
+                      📍 {address}
+                    </p>
+                  ) : GOOGLE_MAPS_API_KEY ? (
+                    <p className="mt-1.5 text-xs text-green-500 dark:text-green-600">
+                      Resolving address…
+                    </p>
+                  ) : null}
+                </div>
+
+                {/* Map preview */}
+                {GOOGLE_MAPS_API_KEY ? (
+                  <a
+                    href={`https://www.google.com/maps?q=${gps.lat},${gps.lng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block overflow-hidden rounded-xl"
+                  >
+                    <img
+                      src={`https://maps.googleapis.com/maps/api/staticmap?center=${gps.lat},${gps.lng}&zoom=17&size=600x240&scale=2&markers=color:red%7C${gps.lat},${gps.lng}&key=${GOOGLE_MAPS_API_KEY}`}
+                      alt="Map of current location"
+                      className="w-full object-cover"
+                    />
+                  </a>
+                ) : (
+                  <a
+                    href={`https://www.google.com/maps?q=${gps.lat},${gps.lng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 py-2 text-sm font-medium text-blue-600 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/40"
+                  >
+                    🗺️ Open in Google Maps
+                  </a>
+                )}
               </div>
             )}
 
