@@ -2,6 +2,8 @@
 
 import { useState, useCallback } from 'react'
 
+const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+
 interface GpsCoords {
   lat: number
   lng: number
@@ -10,6 +12,7 @@ interface GpsCoords {
 
 interface SavedSpot {
   gps: GpsCoords | null
+  address: string | null
   floor: string
   zone: string
   slot: string
@@ -19,8 +22,19 @@ interface SavedSpot {
 const FLOORS = ['B3', 'B2', 'B1', 'G', '1', '2', '3', '4', '5']
 const ZONES = ['A', 'B', 'C', 'D', 'E', 'F']
 
+async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
+  if (!GOOGLE_MAPS_API_KEY) return null
+  const res = await fetch(
+    `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`
+  )
+  if (!res.ok) return null
+  const data = await res.json()
+  return data.results?.[0]?.formatted_address ?? null
+}
+
 export default function CarParkLocator() {
   const [gps, setGps] = useState<GpsCoords | null>(null)
+  const [address, setAddress] = useState<string | null>(null)
   const [gpsStatus, setGpsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [gpsError, setGpsError] = useState('')
   const [floor, setFloor] = useState('B1')
@@ -37,14 +51,18 @@ export default function CarParkLocator() {
     }
     setGpsStatus('loading')
     setGpsError('')
+    setAddress(null)
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setGps({
+      async (pos) => {
+        const coords: GpsCoords = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
           accuracy: Math.round(pos.coords.accuracy),
-        })
+        }
+        setGps(coords)
         setGpsStatus('success')
+        const resolvedAddress = await reverseGeocode(coords.lat, coords.lng)
+        setAddress(resolvedAddress)
       },
       (err) => {
         setGpsStatus('error')
@@ -57,14 +75,15 @@ export default function CarParkLocator() {
   const saveSpot = useCallback(() => {
     const now = new Date()
     const savedAt = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    setSavedSpot({ gps, floor, zone, slot, savedAt })
+    setSavedSpot({ gps, address, floor, zone, slot, savedAt })
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
-  }, [gps, floor, zone, slot])
+  }, [gps, address, floor, zone, slot])
 
   const clearSpot = useCallback(() => {
     setSavedSpot(null)
     setGps(null)
+    setAddress(null)
     setGpsStatus('idle')
     setGpsError('')
     setSlot('')
@@ -106,6 +125,13 @@ export default function CarParkLocator() {
                 <p className="mt-0.5 text-xs text-green-600 dark:text-green-500">
                   Accuracy: ±{gps.accuracy}m
                 </p>
+                {address ? (
+                  <p className="mt-1.5 text-xs text-green-700 dark:text-green-400">📍 {address}</p>
+                ) : GOOGLE_MAPS_API_KEY ? (
+                  <p className="mt-1.5 text-xs text-green-500 dark:text-green-600">
+                    Resolving address…
+                  </p>
+                ) : null}
               </div>
             )}
 
@@ -209,9 +235,14 @@ export default function CarParkLocator() {
                 Floor {savedSpot.floor} · Zone {savedSpot.zone}
                 {savedSpot.slot && ` · #${savedSpot.slot}`}
               </p>
+              {savedSpot.address && (
+                <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                  📍 {savedSpot.address}
+                </p>
+              )}
               {savedSpot.gps ? (
-                <p className="mt-1 font-mono text-xs text-gray-500 dark:text-gray-400">
-                  GPS: {savedSpot.gps.lat.toFixed(6)}, {savedSpot.gps.lng.toFixed(6)}
+                <p className="mt-1 font-mono text-xs text-gray-400 dark:text-gray-500">
+                  {savedSpot.gps.lat.toFixed(6)}, {savedSpot.gps.lng.toFixed(6)}
                 </p>
               ) : (
                 <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">GPS not captured</p>
