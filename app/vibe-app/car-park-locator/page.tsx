@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import Script from 'next/script'
 
 const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
 
@@ -22,16 +23,6 @@ interface SavedSpot {
 const FLOORS = ['B3', 'B2', 'B1', 'G', '1', '2', '3', '4', '5']
 const ZONES = ['A', 'B', 'C', 'D', 'E', 'F']
 
-async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
-  if (!GOOGLE_MAPS_API_KEY) return null
-  const res = await fetch(
-    `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`
-  )
-  if (!res.ok) return null
-  const data = await res.json()
-  return data.results?.[0]?.formatted_address ?? null
-}
-
 export default function CarParkLocator() {
   const [gps, setGps] = useState<GpsCoords | null>(null)
   const [address, setAddress] = useState<string | null>(null)
@@ -42,6 +33,58 @@ export default function CarParkLocator() {
   const [slot, setSlot] = useState('')
   const [savedSpot, setSavedSpot] = useState<SavedSpot | null>(null)
   const [saved, setSaved] = useState(false)
+  const [mapsReady, setMapsReady] = useState(false)
+
+  const mapDivRef = useRef<HTMLDivElement | null>(null)
+  const mapRef = useRef<google.maps.Map | null>(null)
+  const markerRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null)
+  const infoWindowRef = useRef<google.maps.InfoWindow | null>(null)
+  const geocoderRef = useRef<google.maps.Geocoder | null>(null)
+
+  const initMapObjects = useCallback(() => {
+    if (!window.google?.maps) return
+    geocoderRef.current = new google.maps.Geocoder()
+    infoWindowRef.current = new google.maps.InfoWindow()
+    setMapsReady(true)
+  }, [])
+
+  // Create or update the map whenever GPS + mapsReady are both set
+  useEffect(() => {
+    if (!gps || !mapsReady || !mapDivRef.current) return
+
+    const latlng = { lat: gps.lat, lng: gps.lng }
+
+    if (!mapRef.current) {
+      mapRef.current = new google.maps.Map(mapDivRef.current, {
+        center: latlng,
+        zoom: 17,
+        mapId: 'DEMO_MAP_ID',
+        disableDefaultUI: true,
+        zoomControl: true,
+      })
+    } else {
+      mapRef.current.setCenter(latlng)
+      mapRef.current.setZoom(17)
+    }
+
+    if (!markerRef.current) {
+      markerRef.current = new google.maps.marker.AdvancedMarkerElement({
+        map: mapRef.current,
+        position: latlng,
+      })
+    } else {
+      markerRef.current.position = latlng
+    }
+
+    geocoderRef.current?.geocode({ location: latlng }, (results, status) => {
+      if (status === 'OK' && results?.[0]) {
+        const addr = results[0].formatted_address
+        setAddress(addr)
+        infoWindowRef.current?.setContent(addr)
+        infoWindowRef.current?.open({ map: mapRef.current!, anchor: markerRef.current! })
+      }
+    })
+  }, [gps, mapsReady])
 
   const getLocation = useCallback(() => {
     if (!navigator.geolocation) {
@@ -53,16 +96,13 @@ export default function CarParkLocator() {
     setGpsError('')
     setAddress(null)
     navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const coords: GpsCoords = {
+      (pos) => {
+        setGps({
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
           accuracy: Math.round(pos.coords.accuracy),
-        }
-        setGps(coords)
+        })
         setGpsStatus('success')
-        const resolvedAddress = await reverseGeocode(coords.lat, coords.lng)
-        setAddress(resolvedAddress)
       },
       (err) => {
         setGpsStatus('error')
@@ -87,202 +127,205 @@ export default function CarParkLocator() {
     setGpsStatus('idle')
     setGpsError('')
     setSlot('')
+    infoWindowRef.current?.close()
+    if (markerRef.current) markerRef.current.map = null
+    markerRef.current = null
+    mapRef.current = null
   }, [])
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-start bg-gray-50 px-4 py-10 dark:bg-gray-950">
-      <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg dark:bg-gray-900">
-        {/* Header */}
-        <div className="rounded-t-2xl bg-blue-600 px-6 py-5 text-white dark:bg-blue-700">
-          <div className="flex items-center gap-3">
-            <span className="text-3xl">🅿️</span>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight">Car Park Locator</h1>
-              <p className="text-sm text-blue-100">Remember where you parked</p>
+    <>
+      {GOOGLE_MAPS_API_KEY && (
+        <Script
+          src={`https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=marker&v=beta`}
+          strategy="afterInteractive"
+          onLoad={initMapObjects}
+        />
+      )}
+
+      <div className="flex min-h-screen flex-col items-center justify-start bg-gray-50 px-4 py-10 dark:bg-gray-950">
+        <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg dark:bg-gray-900">
+          {/* Header */}
+          <div className="rounded-t-2xl bg-blue-600 px-6 py-5 text-white dark:bg-blue-700">
+            <div className="flex items-center gap-3">
+              <span className="text-3xl">🅿️</span>
+              <div>
+                <h1 className="text-xl font-bold tracking-tight">Car Park Locator</h1>
+                <p className="text-sm text-blue-100">Remember where you parked</p>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="space-y-5 px-6 py-6">
-          {/* GPS Section */}
-          <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
-            <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">
-              GPS Location
-            </p>
-            <button
-              onClick={getLocation}
-              disabled={gpsStatus === 'loading'}
-              className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60 dark:bg-blue-500 dark:hover:bg-blue-600"
-            >
-              {gpsStatus === 'loading' ? '📡 Getting location…' : '📍 Get My Location'}
-            </button>
+          <div className="space-y-5 px-6 py-6">
+            {/* GPS Section */}
+            <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
+              <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">
+                GPS Location
+              </p>
+              <button
+                onClick={getLocation}
+                disabled={gpsStatus === 'loading'}
+                className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60 dark:bg-blue-500 dark:hover:bg-blue-600"
+              >
+                {gpsStatus === 'loading' ? '📡 Getting location…' : '📍 Get My Location'}
+              </button>
 
-            {gpsStatus === 'success' && gps && (
-              <div className="mt-3 space-y-2">
-                <div className="rounded-lg bg-green-50 px-3 py-2 text-sm dark:bg-green-900/20">
-                  <p className="font-mono text-green-700 dark:text-green-400">
-                    {gps.lat.toFixed(6)}, {gps.lng.toFixed(6)}
-                  </p>
-                  <p className="mt-0.5 text-xs text-green-600 dark:text-green-500">
-                    Accuracy: ±{gps.accuracy}m
-                  </p>
-                  {address ? (
-                    <p className="mt-1.5 text-xs text-green-700 dark:text-green-400">
-                      📍 {address}
+              {gpsStatus === 'success' && gps && (
+                <div className="mt-3 space-y-2">
+                  <div className="rounded-lg bg-green-50 px-3 py-2 text-sm dark:bg-green-900/20">
+                    <p className="font-mono text-green-700 dark:text-green-400">
+                      {gps.lat.toFixed(6)}, {gps.lng.toFixed(6)}
                     </p>
-                  ) : GOOGLE_MAPS_API_KEY ? (
-                    <p className="mt-1.5 text-xs text-green-500 dark:text-green-600">
-                      Resolving address…
+                    <p className="mt-0.5 text-xs text-green-600 dark:text-green-500">
+                      Accuracy: ±{gps.accuracy}m
                     </p>
-                  ) : null}
+                    {address ? (
+                      <p className="mt-1.5 text-xs text-green-700 dark:text-green-400">
+                        📍 {address}
+                      </p>
+                    ) : GOOGLE_MAPS_API_KEY ? (
+                      <p className="mt-1.5 text-xs text-green-500 dark:text-green-600">
+                        Resolving address…
+                      </p>
+                    ) : null}
+                  </div>
+
+                  {/* Map */}
+                  {GOOGLE_MAPS_API_KEY ? (
+                    <div ref={mapDivRef} className="h-56 w-full overflow-hidden rounded-xl" />
+                  ) : (
+                    <a
+                      href={`https://www.google.com/maps?q=${gps.lat},${gps.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 py-2 text-sm font-medium text-blue-600 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/40"
+                    >
+                      🗺️ Open in Google Maps
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {gpsStatus === 'error' && (
+                <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
+                  ⚠️ {gpsError}
+                </div>
+              )}
+            </div>
+
+            {/* Manual Input Section */}
+            <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
+              <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">
+                Parking Details
+              </p>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <label
+                    htmlFor="select-floor"
+                    className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
+                  >
+                    Floor
+                  </label>
+                  <select
+                    id="select-floor"
+                    value={floor}
+                    onChange={(e) => setFloor(e.target.value)}
+                    className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+                  >
+                    {FLOORS.map((f) => (
+                      <option key={f} value={f}>
+                        {f}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
-                {/* Map preview */}
-                {GOOGLE_MAPS_API_KEY ? (
-                  <a
-                    href={`https://www.google.com/maps?q=${gps.lat},${gps.lng}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block overflow-hidden rounded-xl"
+                <div className="flex items-center gap-3">
+                  <label
+                    htmlFor="select-zone"
+                    className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
                   >
-                    <img
-                      src={`https://maps.googleapis.com/maps/api/staticmap?center=${gps.lat},${gps.lng}&zoom=17&size=600x240&scale=2&markers=color:red%7C${gps.lat},${gps.lng}&key=${GOOGLE_MAPS_API_KEY}`}
-                      alt="Map of current location"
-                      className="w-full object-cover"
-                    />
-                  </a>
-                ) : (
-                  <a
-                    href={`https://www.google.com/maps?q=${gps.lat},${gps.lng}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 py-2 text-sm font-medium text-blue-600 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/40"
+                    Zone
+                  </label>
+                  <select
+                    id="select-zone"
+                    value={zone}
+                    onChange={(e) => setZone(e.target.value)}
+                    className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
                   >
-                    🗺️ Open in Google Maps
-                  </a>
+                    {ZONES.map((z) => (
+                      <option key={z} value={z}>
+                        Zone {z}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <label
+                    htmlFor="input-slot"
+                    className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
+                  >
+                    Slot
+                  </label>
+                  <input
+                    id="input-slot"
+                    type="text"
+                    value={slot}
+                    onChange={(e) => setSlot(e.target.value)}
+                    placeholder="e.g. C14 (optional)"
+                    className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white dark:placeholder-gray-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Save Button */}
+            <button
+              onClick={saveSpot}
+              className="w-full rounded-xl bg-emerald-600 px-4 py-3 font-semibold text-white transition hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600"
+            >
+              {saved ? '✅ Saved!' : '💾 Save My Parking Spot'}
+            </button>
+
+            {/* Saved Summary */}
+            {savedSpot && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-800 dark:bg-emerald-900/20">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-xs font-semibold tracking-widest text-emerald-700 uppercase dark:text-emerald-400">
+                    Saved Spot
+                  </p>
+                  <button
+                    onClick={clearSpot}
+                    className="text-xs text-gray-400 hover:text-red-500 dark:hover:text-red-400"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <p className="text-lg font-bold text-gray-900 dark:text-white">
+                  Floor {savedSpot.floor} · Zone {savedSpot.zone}
+                  {savedSpot.slot && ` · #${savedSpot.slot}`}
+                </p>
+                {savedSpot.address && (
+                  <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                    📍 {savedSpot.address}
+                  </p>
                 )}
-              </div>
-            )}
-
-            {gpsStatus === 'error' && (
-              <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
-                ⚠️ {gpsError}
+                {savedSpot.gps ? (
+                  <p className="mt-1 font-mono text-xs text-gray-400 dark:text-gray-500">
+                    {savedSpot.gps.lat.toFixed(6)}, {savedSpot.gps.lng.toFixed(6)}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">GPS not captured</p>
+                )}
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Saved at {savedSpot.savedAt}
+                </p>
               </div>
             )}
           </div>
-
-          {/* Manual Input Section */}
-          <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
-            <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">
-              Parking Details
-            </p>
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <label
-                  htmlFor="select-floor"
-                  className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
-                >
-                  Floor
-                </label>
-                <select
-                  id="select-floor"
-                  value={floor}
-                  onChange={(e) => setFloor(e.target.value)}
-                  className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
-                >
-                  {FLOORS.map((f) => (
-                    <option key={f} value={f}>
-                      {f}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <label
-                  htmlFor="select-zone"
-                  className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
-                >
-                  Zone
-                </label>
-                <select
-                  id="select-zone"
-                  value={zone}
-                  onChange={(e) => setZone(e.target.value)}
-                  className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
-                >
-                  {ZONES.map((z) => (
-                    <option key={z} value={z}>
-                      Zone {z}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <label
-                  htmlFor="input-slot"
-                  className="w-12 text-sm font-medium text-gray-700 dark:text-gray-300"
-                >
-                  Slot
-                </label>
-                <input
-                  id="input-slot"
-                  type="text"
-                  value={slot}
-                  onChange={(e) => setSlot(e.target.value)}
-                  placeholder="e.g. C14 (optional)"
-                  className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white dark:placeholder-gray-500"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Save Button */}
-          <button
-            onClick={saveSpot}
-            className="w-full rounded-xl bg-emerald-600 px-4 py-3 font-semibold text-white transition hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600"
-          >
-            {saved ? '✅ Saved!' : '💾 Save My Parking Spot'}
-          </button>
-
-          {/* Saved Summary */}
-          {savedSpot && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-800 dark:bg-emerald-900/20">
-              <div className="mb-2 flex items-center justify-between">
-                <p className="text-xs font-semibold tracking-widest text-emerald-700 uppercase dark:text-emerald-400">
-                  Saved Spot
-                </p>
-                <button
-                  onClick={clearSpot}
-                  className="text-xs text-gray-400 hover:text-red-500 dark:hover:text-red-400"
-                >
-                  Clear
-                </button>
-              </div>
-              <p className="text-lg font-bold text-gray-900 dark:text-white">
-                Floor {savedSpot.floor} · Zone {savedSpot.zone}
-                {savedSpot.slot && ` · #${savedSpot.slot}`}
-              </p>
-              {savedSpot.address && (
-                <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  📍 {savedSpot.address}
-                </p>
-              )}
-              {savedSpot.gps ? (
-                <p className="mt-1 font-mono text-xs text-gray-400 dark:text-gray-500">
-                  {savedSpot.gps.lat.toFixed(6)}, {savedSpot.gps.lng.toFixed(6)}
-                </p>
-              ) : (
-                <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">GPS not captured</p>
-              )}
-              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Saved at {savedSpot.savedAt}
-              </p>
-            </div>
-          )}
         </div>
       </div>
-    </div>
+    </>
   )
 }
