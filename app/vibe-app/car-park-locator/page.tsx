@@ -82,9 +82,14 @@ export default function CarParkLocator() {
       },
       (err) => {
         setGpsStatus('error')
-        setGpsError(err.message || 'Unable to retrieve location.')
+        const messages: Record<number, string> = {
+          1: 'Location permission denied. Please allow location access in your browser settings.',
+          2: 'Position unavailable. Try moving to an open area with better GPS signal, then retry.',
+          3: 'Location request timed out. Please retry.',
+        }
+        setGpsError(messages[err.code] ?? err.message ?? 'Unable to retrieve location.')
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 30000 }
     )
   }, [])
 
@@ -163,8 +168,14 @@ export default function CarParkLocator() {
             )}
 
             {gpsStatus === 'error' && (
-              <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
-                ⚠️ {gpsError}
+              <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm dark:bg-red-900/20">
+                <p className="text-red-600 dark:text-red-400">⚠️ {gpsError}</p>
+                <button
+                  onClick={getLocation}
+                  className="mt-2 text-xs font-medium text-red-600 underline hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                >
+                  Retry
+                </button>
               </div>
             )}
           </div>
