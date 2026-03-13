@@ -23,6 +23,7 @@ interface SavedSpot {
 
 const FLOORS = ['B3', 'B2', 'B1', 'G', '1', '2', '3', '4', '5']
 const ZONES = ['A', 'B', 'C', 'D', 'E', 'F']
+const STORAGE_KEY = 'carpark-saved-spot'
 
 async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
   const res = await fetch(
@@ -43,7 +44,14 @@ export default function CarParkLocator() {
   const [floor, setFloor] = useState('B1')
   const [zone, setZone] = useState('A')
   const [slot, setSlot] = useState('')
-  const [savedSpot, setSavedSpot] = useState<SavedSpot | null>(null)
+  const [savedSpot, setSavedSpot] = useState<SavedSpot | null>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY)
+      return stored ? (JSON.parse(stored) as SavedSpot) : null
+    } catch {
+      return null
+    }
+  })
   const [saved, setSaved] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -96,7 +104,13 @@ export default function CarParkLocator() {
   const saveSpot = useCallback(() => {
     const now = new Date()
     const savedAt = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    setSavedSpot({ gps, address, floor, zone, slot, savedAt })
+    const spot: SavedSpot = { gps, address, floor, zone, slot, savedAt }
+    setSavedSpot(spot)
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(spot))
+    } catch {
+      // localStorage unavailable (e.g. private browsing quota exceeded) — ignore
+    }
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }, [gps, address, floor, zone, slot])
@@ -104,6 +118,11 @@ export default function CarParkLocator() {
   const clearSpot = useCallback(() => {
     abortRef.current?.abort()
     setSavedSpot(null)
+    try {
+      localStorage.removeItem(STORAGE_KEY)
+    } catch {
+      // ignore
+    }
     setGps(null)
     setAddress(null)
     setGpsStatus('idle')
