@@ -2,7 +2,7 @@ const headerNavLinks = [
   { href: '/', title: 'Home' },
   { href: '/blog', title: 'Blog' },
   { href: '/tags', title: 'Tags' },
-  { href: '/experience', title: 'Experience' },
+  { href: '/portfolio', title: 'Portfolio' },
   { href: '/vibe-app', title: 'Vibe App' },
   { href: '/about', title: 'About' },
 ]
