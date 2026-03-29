@@ -1,13 +1,16 @@
 {
-  "ai": 2,
-  "llm": 1,
-  "machine-learning": 1,
+  "x-algorithm": 1,
+  "recommendation-system": 1,
+  "machine-learning": 2,
+  "system-design": 1,
   "vibe-coding": 3,
   "claude-code": 3,
-  "side-project": 1,
-  "project-management": 1,
-  "bmad": 1,
   "terraform": 1,
   "deployment": 1,
-  "aws": 1
+  "aws": 1,
+  "project-management": 1,
+  "bmad": 1,
+  "ai": 2,
+  "side-project": 1,
+  "llm": 1
 }

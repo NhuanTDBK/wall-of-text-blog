@@ -1,0 +1,559 @@
+---
+title: 'X Algorithm Part 3: Candidate Sourcing — Thunder and Phoenix Retrieval'
+date: '2026-03-29'
+tags: ['x-algorithm', 'recommendation-system', 'machine-learning', 'rust']
+draft: false
+summary: 'How X finds ~200 candidate posts from billions in milliseconds — Thunder keeps in-network posts in memory, while Phoenix Retrieval uses a two-tower transformer to discover out-of-network content via embedding similarity search.'
+authors: ['default']
+---
+
+# X Algorithm Part 3: Candidate Sourcing — Thunder and Phoenix Retrieval
+
+This is **Part 3** of a 5-part series on the X recommendation algorithm. [Part 1](/blog/x-algorithm-part-1) gives the big-picture overview. [Part 2](/blog/x-algorithm-part-2) covers the pipeline framework. [Part 4](/blog/x-algorithm-part-4) dives into the ranking transformer. [Part 5](/blog/x-algorithm-part-5) covers scoring, filtering, and the final feed.
+
+---
+
+Before any ranking can happen, the pipeline needs candidates. Finding ~200 posts worth scoring — out of billions — is itself a non-trivial problem. X solves it with two completely different systems running in parallel:
+
+- **Thunder**: Serves posts from accounts you follow. In-memory, sub-millisecond, no ML.
+- **Phoenix Retrieval**: Discovers posts outside your social graph. ML-based, embedding similarity search.
+
+Each source returns ~100 candidates. Together they give the ranker enough material to build a diverse feed.
+
+---
+
+## Table of Contents
+
+- [Thunder: The In-Memory Post Store](#thunder-the-in-memory-post-store)
+  - [Data Structure](#data-structure)
+  - [Kafka Ingestion](#kafka-ingestion)
+  - [Reply Filtering Logic](#reply-filtering-logic)
+  - [The `score_recent` Heuristic](#the-score_recent-heuristic)
+  - [Concurrency Control](#concurrency-control)
+- [Phoenix Retrieval: Two-Tower Similarity Search](#phoenix-retrieval-two-tower-similarity-search)
+  - [Architecture Overview](#architecture-overview)
+  - [The User Tower](#the-user-tower)
+  - [The Candidate Tower](#the-candidate-tower)
+  - [Top-K Retrieval](#top-k-retrieval)
+  - [Hash-Based Embeddings](#hash-based-embeddings)
+- [Two Sources, One Feed](#two-sources-one-feed)
+- [Design Analysis](#design-analysis)
+  - [Are embeddings computed on the fly or precomputed?](#are-embeddings-computed-on-the-fly-or-precomputed)
+  - [Is the similarity search done in a vector database?](#is-the-similarity-search-done-in-a-vector-database)
+  - [Where does Phoenix Retrieval actually run?](#where-does-phoenix-retrieval-actually-run)
+  - [Where does user engagement history come from?](#where-does-user-engagement-history-come-from)
+  - [Why hash-based embeddings? What about new users and posts?](#why-hash-based-embeddings-what-about-new-users-and-posts)
+  - [How does on-the-fly GPU inference scale?](#how-does-on-the-fly-gpu-inference-scale)
+  - [What happens when a service goes down?](#what-happens-when-a-service-goes-down)
+
+---
+
+## Thunder: The In-Memory Post Store
+
+Thunder is a Rust service that holds recent posts from every user in memory, indexed by author ID. When a feed request comes in, it receives the user's following list and returns the most recent posts from all of them in a single in-memory scan — no database round-trip.
+
+### Data Structure
+
+[`thunder/posts/post_store.rs:39-53`](https://github.com/xai-org/x-algorithm/blob/main/thunder/posts/post_store.rs#L39-L53)
+
+```rust
+pub struct PostStore {
+    /// Full post data indexed by post_id
+    posts: Arc<DashMap<i64, LightPost>>,
+    /// Original posts (non-reply, non-retweet) per author
+    original_posts_by_user: Arc<DashMap<i64, VecDeque<TinyPost>>>,
+    /// Replies and retweets per author
+    secondary_posts_by_user: Arc<DashMap<i64, VecDeque<TinyPost>>>,
+    /// Video posts per author
+    video_posts_by_user: Arc<DashMap<i64, VecDeque<TinyPost>>>,
+    deleted_posts: Arc<DashMap<i64, bool>>,
+    retention_seconds: u64,
+    request_timeout: Duration,
+}
+```
+
+Three separate indexes cover the three content types that get different treatment downstream: original posts, replies/retweets, and video posts. `DashMap` is a concurrent HashMap — all indexes are readable by many threads simultaneously with no global lock.
+
+The two-level structure is intentional. Each user's timeline stores lightweight `TinyPost` references (just `post_id` + `created_at`), while full post data lives in a separate `posts` map:
+
+[`thunder/posts/post_store.rs:20-34`](https://github.com/xai-org/x-algorithm/blob/main/thunder/posts/post_store.rs#L20-L34)
+
+```rust
+pub struct TinyPost {
+    pub post_id: i64,
+    pub created_at: i64,
+}
+```
+
+When looking up a user's posts, you iterate `TinyPost` references and only fetch full `LightPost` data for the ones that pass preliminary filters. This avoids loading full post payloads for every followed account.
+
+### Kafka Ingestion
+
+Thunder is kept fresh by consuming Kafka events. Whenever a post is created or deleted anywhere on X, Thunder receives the event and updates its in-memory store. On insert:
+
+[`thunder/posts/post_store.rs:86-101`](https://github.com/xai-org/x-algorithm/blob/main/thunder/posts/post_store.rs#L86-L101)
+
+```rust
+pub fn insert_posts(&self, mut posts: Vec<LightPost>) {
+    let current_time = ...;
+    posts.retain(|p| {
+        p.created_at < current_time
+            && current_time - p.created_at <= (self.retention_seconds as i64)
+    });
+    posts.sort_unstable_by_key(|p| p.created_at);
+    Self::insert_posts_internal(self, posts);
+}
+```
+
+Posts older than the retention window (default: 2 days) are rejected at ingestion. This keeps memory bounded without a full scan.
+
+### Reply Filtering Logic
+
+Not every reply from a followed account should appear in your feed. Thunder applies a nuanced filter for secondary posts (replies and retweets):
+
+[`thunder/posts/post_store.rs:291-315`](https://github.com/xai-org/x-algorithm/blob/main/thunder/posts/post_store.rs#L291-L315)
+
+```rust
+let filtered_post_iter = light_post_iter.filter(|post| {
+    if following_users.is_empty() {
+        return true;
+    }
+    post.in_reply_to_post_id.is_none_or(|reply_to_post_id| {
+        if let Some(replied_to_post) = self.posts.get(&reply_to_post_id) {
+            // Allow replies to original posts (not reply chains)
+            if !replied_to_post.is_retweet && !replied_to_post.is_reply {
+                return true;
+            }
+            // Allow reply-to-reply only if: replying to a thread root AND replying to a followed user
+            return post.conversation_id.is_some_and(|convo_id| {
+                let reply_to_reply_to_original =
+                    replied_to_post.in_reply_to_post_id == Some(convo_id);
+                let reply_to_followed_user = post
+                    .in_reply_to_user_id
+                    .map(|uid| following_users.contains(&uid))
+                    .unwrap_or(false);
+                reply_to_reply_to_original && reply_to_followed_user
+            });
+        }
+        false
+    })
+});
+```
+
+A reply is included only if: it replies directly to an original post, OR it's a reply-to-reply that stays within the conversation root AND targets another followed user. This prevents deep reply chains from cluttering the feed while keeping relevant conversations visible.
+
+### The `score_recent` Heuristic
+
+Before Thunder returns candidates to HomeMixer, it does a simple recency sort and truncates:
+
+[`thunder/thunder_service.rs:334-339`](https://github.com/xai-org/x-algorithm/blob/main/thunder/thunder_service.rs#L334-L339)
+
+```rust
+fn score_recent(mut light_posts: Vec<LightPost>, max_results: usize) -> Vec<LightPost> {
+    light_posts.sort_unstable_by_key(|post| Reverse(post.created_at));
+    light_posts.into_iter().take(max_results).collect()
+}
+```
+
+Thunder doesn't rank — it just returns the most recent posts up to `max_results`. All the real ranking happens in Phoenix. Thunder's job is simply to get the right candidates into the pipeline as fast as possible.
+
+### Concurrency Control
+
+The service wraps every request in a semaphore to prevent overload:
+
+[`thunder/thunder_service.rs:160-170`](https://github.com/xai-org/x-algorithm/blob/main/thunder/thunder_service.rs#L160-L170)
+
+```rust
+let _permit = match self.request_semaphore.try_acquire() {
+    Ok(permit) => {
+        IN_FLIGHT_REQUESTS.inc();
+        permit
+    }
+    Err(_) => {
+        REJECTED_REQUESTS.inc();
+        return Err(Status::resource_exhausted("Server at capacity, please retry"));
+    }
+};
+```
+
+`try_acquire()` is non-blocking — if the semaphore is full, the request is rejected immediately with `RESOURCE_EXHAUSTED` rather than queueing. This keeps latency predictable under load; a backed-up queue would only make things worse.
+
+The DashMap iteration itself runs inside `tokio::task::spawn_blocking` to avoid blocking the async runtime during the CPU-bound scan.
+
+---
+
+## Phoenix Retrieval: Two-Tower Similarity Search
+
+Thunder covers in-network content — posts from people you follow. But your following graph is a small slice of X. Phoenix Retrieval answers the harder question: *what posts from the entire corpus would this user likely engage with?*
+
+The answer is a two-tower model: encode the user into an embedding, encode every post into an embedding, retrieve the posts whose embeddings are closest to the user's.
+
+### Architecture Overview
+
+```
+USER TOWER (expensive, per request)          CANDIDATE TOWER (cheap, precomputed)
+┌────────────────────────────────┐           ┌──────────────────────────────┐
+│ User hash embeddings           │           │ Post hash embeddings          │
+│ + Engagement history           │           │ + Author hash embeddings      │
+│   (posts, authors, actions,    │           │                               │
+│    product surfaces)           │           │ → 2-layer MLP with SiLU       │
+│                                │           │ → Project to D dimensions     │
+│ → Grok transformer             │           │ → L2 normalize                │
+│ → Mean pool over sequence      │           │                               │
+│ → L2 normalize                 │           │ Result: [N, D] corpus matrix  │
+│                                │           │ (precomputed, cached)         │
+│ Result: [B, D] user vector     │           └──────────────────────────────┘
+└────────────────────────────────┘
+              │                                            │
+              └──────────── dot product ───────────────────┘
+                                │
+                           top_k selection
+                                │
+                        ~100 candidates
+```
+
+The asymmetry is a deliberate efficiency choice. The user tower uses the full Grok transformer — it's heavy but runs only once per request. The candidate tower is a lightweight 2-layer MLP whose outputs can be precomputed for the entire corpus and cached. At inference time, the only per-request work is the user tower + a matrix multiplication.
+
+### The User Tower
+
+[`phoenix/recsys_retrieval_model.py:206-276`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/recsys_retrieval_model.py#L206-L276)
+
+```python
+def build_user_representation(self, batch, recsys_embeddings):
+    # Combine user hash embeddings + history embeddings
+    embeddings = jnp.concatenate([user_embeddings, history_embeddings], axis=1)
+
+    # Run through transformer (same architecture as the ranker)
+    model_output = self.model(embeddings, padding_mask, candidate_start_offset=None)
+
+    # Mean pool over all valid positions
+    mask_float = padding_mask.astype(jnp.float32)[:, :, None]
+    user_embedding_sum = jnp.sum(user_outputs * mask_float, axis=1)
+    user_representation = user_embedding_sum / jnp.maximum(mask_sum, 1.0)
+
+    # L2 normalize for dot product similarity
+    user_norm = jnp.sqrt(jnp.maximum(jnp.sum(user_representation**2, ...), EPS))
+    user_representation = user_representation / user_norm
+
+    return user_representation, user_norm  # [B, D]
+```
+
+The user tower uses the same Grok transformer as the ranker (Part 4). The input sequence is `[user_embedding] + [history_embeddings]` — no candidate tokens here. After the transformer, all positions are mean-pooled into a single `[D]` vector, then L2-normalized.
+
+### The Candidate Tower
+
+[`phoenix/recsys_retrieval_model.py:47-99`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/recsys_retrieval_model.py#L47-L99)
+
+```python
+class CandidateTower(hk.Module):
+    def __call__(self, post_author_embedding):
+        # Flatten concatenated post + author hash embeddings
+        post_author_embedding = jnp.reshape(post_author_embedding, (B, C, -1))
+
+        # 2-layer MLP with SiLU activation
+        hidden = jnp.dot(post_author_embedding, proj_1)  # → D*2 dimensions
+        hidden = jax.nn.silu(hidden)
+        candidate_embeddings = jnp.dot(hidden, proj_2)  # → D dimensions
+
+        # L2 normalize
+        candidate_norm = jnp.sqrt(jnp.maximum(jnp.sum(candidate_embeddings**2, ...), EPS))
+        candidate_representation = candidate_embeddings / candidate_norm
+
+        return candidate_representation  # [B, C, D]
+```
+
+A post is represented purely by hash embeddings of its post ID and author ID — no text, no content. The MLP maps the concatenated hash embeddings down to a `D`-dimensional vector and normalizes it. Because the candidate tower has no dependency on the user, its outputs can be computed offline for the entire corpus.
+
+### Top-K Retrieval
+
+With both towers producing L2-normalized vectors, retrieval is a single matrix multiplication:
+
+[`phoenix/recsys_retrieval_model.py:365-370`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/recsys_retrieval_model.py#L365-L370)
+
+```python
+def _retrieve_top_k(self, user_representation, corpus_embeddings, top_k, corpus_mask=None):
+    # user_representation: [B, D]
+    # corpus_embeddings:   [N, D]  ← precomputed for all N posts in corpus
+    scores = jnp.matmul(user_representation, corpus_embeddings.T)  # [B, N]
+
+    if corpus_mask is not None:
+        scores = jnp.where(corpus_mask[None, :], scores, -INF)  # mask invalid entries
+
+    top_k_scores, top_k_indices = jax.lax.top_k(scores, top_k)  # [B, K]
+    return top_k_indices, top_k_scores
+```
+
+`jnp.matmul(user, corpus.T)` computes the dot product similarity between the user and every post in the corpus in one vectorized operation. `jax.lax.top_k` extracts the top-K indices. The result is a list of post IDs — the out-of-network candidates.
+
+### Hash-Based Embeddings
+
+Neither tower uses post text or explicit features. Posts and users are identified by hash IDs:
+
+[`phoenix/recsys_model.py:33-38`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/recsys_model.py#L33-L38)
+
+```python
+@dataclass
+class HashConfig:
+    num_user_hashes: int = 2
+    num_item_hashes: int = 2
+    num_author_hashes: int = 2
+```
+
+Each entity is hashed with multiple independent hash functions. The resulting embeddings are concatenated and projected down. Multiple hashes reduce the chance that two unrelated entities collide to the same embedding — a form of ensemble redundancy. Hash 0 is reserved for padding, so validity can be checked cheaply at `hashes[:, 0] != 0`.
+
+---
+
+## Design Analysis
+
+A few things about this system that aren't obvious from reading the code in isolation.
+
+### Are embeddings computed on the fly or precomputed?
+
+**Post (corpus) embeddings are precomputed and held in memory.** The `RecsysRetrievalInferenceRunner` holds a `corpus_embeddings: jax.Array` field — a precomputed `[N, D]` matrix loaded at service startup via `set_corpus()`. It lives in GPU memory and is refreshed offline periodically. Post embeddings don't change per-request.
+
+**User embeddings are computed on the fly.** The user tower (Grok transformer) runs fresh each request, consuming the user's engagement history as input. This is why the towers are asymmetric: the expensive computation (transformer) runs once per request on the user side; the cheap computation (MLP) runs offline on the post side.
+
+### Is the similarity search done in a vector database?
+
+No. There's no FAISS, Pinecone, or other vector database. It's a literal matrix multiply in GPU memory:
+
+```python
+scores = jnp.matmul(user_representation, corpus_embeddings.T)  # [B, N]
+top_k_indices = jax.lax.top_k(scores, top_k)
+```
+
+The entire `[N, D]` corpus matrix is held in memory and the search runs at inference time. This is exact search — at X's scale in production, approximate nearest neighbor (ANN) would almost certainly be needed, but the open-source code implements brute-force matmul.
+
+### Where does Phoenix Retrieval actually run?
+
+**It's a separate Python/JAX service, called via gRPC from Rust.** The `PhoenixSource` in home-mixer holds a `PhoenixRetrievalClient` and makes a network call per request:
+
+[`home-mixer/sources/phoenix_source.rs`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/sources/phoenix_source.rs)
+
+```rust
+let response = self
+    .phoenix_retrieval_client
+    .retrieve(user_id, sequence.clone(), p::PHOENIX_MAX_RESULTS)
+    .await?;
+```
+
+The language boundary is explicit: Rust (home-mixer) → gRPC → Python/JAX (Phoenix service). Phoenix loads the model and corpus embeddings into GPU memory at startup and serves retrieval requests over the network.
+
+### Where does user engagement history come from?
+
+**A dedicated UAS (User Action Sequence) service**, called via Thrift RPC during query hydration. The `UserActionSeqQueryHydrator` calls it each request:
+
+[`home-mixer/query_hydrators/user_action_seq_query_hydrator.rs`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/query_hydrators/user_action_seq_query_hydrator.rs)
+
+```rust
+let uas_thrift = self
+    .uas_fetcher
+    .get_by_user_id(query.user_id)
+    .await?;
+```
+
+The UAS service isn't in the open-source release, but its role is clear: it consumes user engagement events from Kafka (likes, replies, reposts, etc.), persists them in its own storage keyed by user ID, and serves them via Thrift RPC. Home-mixer never touches a database directly — each data domain (user history, user features, author info, post data) has its own dedicated service.
+
+After fetching the raw sequence, the hydrator applies aggregation and filtering before attaching it to the query:
+
+```
+raw ThriftUserActionSequence
+  → KeepOriginalUserActionFilter  (remove retweets and replies from history)
+  → DefaultAggregator             (aggregate within UAS_WINDOW_TIME_MS)
+  → DenseAggregatedActionFilter   (remove sparse/noisy actions)
+  → truncate to UAS_MAX_SEQUENCE_LENGTH
+  → attach to ScoredPostsQuery.user_action_sequence
+```
+
+### Why hash-based embeddings? What about new users and posts?
+
+The alternative to hash embeddings is a **direct ID embedding table**: a lookup where each unique user ID or post ID maps to a learnable embedding vector. That's the standard approach in traditional collaborative filtering. So why hash instead?
+
+**The problem with direct ID tables at X's scale:**
+
+1. **Vocabulary management.** User and post IDs are 64-bit integers. You'd need to maintain a mapping from every ID to a table index — updated whenever a new user registers or post is created. At X's scale that's a constant operational burden.
+
+2. **New IDs are out-of-vocabulary.** A user or post that wasn't in the training set gets no embedding at all. Direct tables have no mechanism to handle unseen IDs at inference time.
+
+3. **Table size.** A 128-dim embedding table for 500M users = 500M × 128 × 4 bytes ≈ 256GB. Hash tables are bounded by `table_size`, not by entity count.
+
+**How hashing solves these:**
+
+Any 64-bit ID is hashable by definition — no vocabulary file, no registration step. The hash function maps the ID to one of `table_size` buckets (independently for each hash function). Multiple hash functions per entity (`num_user_hashes=2`, `num_item_hashes=2`) reduce the probability two unrelated entities share the same embedding. Hash 0 is reserved for padding:
+
+[`phoenix/recsys_model.py:116-117`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/recsys_model.py#L116-L117)
+
+```python
+# hash 0 is reserved for padding
+user_padding_mask = (user_hashes[:, 0] != 0).reshape(B, 1).astype(jnp.bool_)
+```
+
+Multiple hash embeddings are **concatenated** and projected down to `D` dimensions via a **learned linear projection** — not averaged:
+
+[`phoenix/recsys_model.py:99-118`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/recsys_model.py#L99-L118)
+
+```python
+# Step 1: concatenate both hash embeddings → [B, 1, 2D]
+user_embedding = user_embeddings.reshape((B, 1, num_user_hashes * D))
+
+# Step 2: project down with a LEARNED matrix [2D → D]
+proj_mat_1 = hk.get_parameter("proj_mat_1", [num_user_hashes * D, D], ...)
+user_embedding = jnp.dot(user_embedding, proj_mat_1)  # → [B, 1, D]
+```
+
+This is meaningfully different from averaging. Averaging treats both hash embeddings symmetrically and loses information. A learned projection can weight them differently, detect when both hashes agree (lower collision probability) vs disagree, and learn identity-specific combinations end-to-end.
+
+**The trade-off:** hashing trades exact identity representation for vocabulary-free scalability. Each bucket's embedding reflects patterns from all entities that ever hashed there during training — useful as a "cluster" signal, but not a precise identity. Two unrelated users who collide on both hashes will get the same embedding.
+
+**Why fixed table size?**
+
+Yes — the embedding table is `[table_size, D]` where `table_size` is a fixed hyperparameter. This bounds memory regardless of how many users or posts exist. A direct ID table would grow unboundedly as new entities are created; a hash table stays the same size forever.
+
+**What happens on collision — do new entities overwrite existing ones?**
+
+No. Colliding entities **share** the bucket — they don't overwrite each other. Here's what actually happens:
+
+```
+Training phase:
+  User A  →  hash → bucket 42  →  gradients flow into embedding[42]
+  User B  →  hash → bucket 42  →  gradients also flow into embedding[42]
+
+  embedding[42] ends up reflecting the combined/averaged pattern
+  of every entity that ever mapped here during training
+```
+
+When a new entity C hashes to bucket 42 at inference time:
+- It **inherits** embedding[42] immediately — no "empty" or random initialization
+- If C later gets trained on, gradient updates flow into bucket 42 alongside A and B
+- This gradually shifts bucket 42 toward C's pattern — which slightly degrades A and B's representation, but with a large enough table and 2 independent hash functions, the effect is diluted
+
+This is why the second hash matters. Entity A might map to `(bucket_42, bucket_17)` and entity C to `(bucket_42, bucket_83)`. They share bucket 42 but differ on the second hash. The model receives both embeddings concatenated into a `[2D]` vector, then projected through a learned `[2D → D]` matrix. Even though bucket 42 is shared, the different second-hash embeddings produce different `[2D]` inputs — and the learned projection can exploit that difference to partially distinguish them.
+
+In practice:
+- **High-frequency entities** (popular users, viral posts) accumulate many gradient updates and dominate their buckets
+- **Low-frequency entities** share buckets with others and get weaker, more "averaged" representations
+- **New entities** inherit whatever their bucket learned — which is a useful prior if they're similar to existing entities, and noise if they're not
+
+---
+
+**New users (cold start):**
+
+A new user's hash values map to buckets trained on other users. Those bucket embeddings carry some weak population-level signal — but the bigger problem is the **user history sequence**.
+
+The user tower needs `user_action_sequence`. A brand new user has no engagement history → UAS returns empty → `UserActionSeqQueryHydrator` returns an error → `PhoenixSource` fails → **zero out-of-network candidates**.
+
+The new user gets **Thunder only**: in-network posts from accounts they follow. This works if they've followed anyone, but gives them no discovery through Phoenix Retrieval. The open-source release doesn't show a cold-start fallback; at production scale X almost certainly has a separate onboarding system for this.
+
+**New posts (cold start):**
+
+A new post's hash maps to a trained bucket immediately — no registration needed, no "out of vocabulary" error. The embedding it receives reflects other posts that hashed to the same bucket during training, which is at least a starting point.
+
+The harder issue is **corpus freshness**. Phoenix Retrieval only surfaces posts that are in the precomputed corpus embedding matrix. That matrix is built offline and periodically refreshed:
+
+```
+New post published
+  → Kafka event
+  → Thunder receives it immediately (<1s, Kafka ingestion)
+  → Phoenix corpus does NOT include it until next offline refresh
+
+Thunder: serves new posts to followers instantly
+Phoenix: cannot retrieve new posts until corpus is rebuilt
+```
+
+This means **new viral posts are initially invisible to out-of-network users** — they can only spread through the in-network Thunder path (shares and reposts from followed accounts). Only after the next corpus refresh do they become eligible for Phoenix discovery. This is a fundamental limitation of precomputed corpus embeddings.
+
+---
+
+### How does on-the-fly GPU inference scale?
+
+The obvious concern: if the Grok transformer runs fresh per request, and X handles millions of feed refreshes daily — is GPU inference fast enough?
+
+The answer is that **"Grok" here does not mean the 314B Grok LLM**. The open-source model config makes this clear:
+
+[`phoenix/run_ranker.py:45-53`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/run_ranker.py#L45-L53)
+
+```python
+TransformerConfig(
+    emb_size=128,        # embedding dimension
+    widening_factor=2,   # FFN multiplier
+    key_size=64,         # attention head size
+    num_q_heads=2,       # query heads
+    num_kv_heads=2,      # key/value heads
+    num_layers=2,        # transformer layers
+    attn_output_multiplier=0.125,
+)
+```
+
+2 layers. 128 dimensions. 2 heads. The total parameter count is in the hundreds of thousands — orders of magnitude smaller than a large language model. It shares the *architectural patterns* of Grok (RMSNorm, RoPE, grouped query attention, gated FFN) but is a purpose-built small model for real-time recommendation.
+
+Several other design choices keep inference tractable at scale:
+
+**Short sequences.** The transformer processes `history_seq_len=32` history tokens plus `candidate_seq_len=8` candidate tokens — 40 tokens total. Attention cost is O(T²), so 40 tokens is negligible compared to a typical LLM's context window.
+
+**All candidates in one forward pass.** The candidate isolation mask (covered in Part 4) lets the model score all 8 candidates simultaneously in a single forward pass. Candidates can attend to the user+history context but not to each other, so their scores are independent — but computed together. Without this mask design, you'd need 8 separate forward passes per request.
+
+**bfloat16 inference.** The runner sets `fprop_dtype = jnp.bfloat16` at inference time, halving memory bandwidth and doubling throughput on modern GPUs. Softmax is kept in float32 for numerical stability:
+
+[`phoenix/grok.py:338-354`](https://github.com/xai-org/x-algorithm/blob/main/phoenix/grok.py#L338-L354)
+
+```python
+# Attention logit capping — prevents overflow in bfloat16
+attn_logits *= self.attn_output_multiplier      # scale down by 0.125
+max_attn_val = jnp.array(30.0, dtype=jnp.float32)
+attn_logits = max_attn_val * jnp.tanh(attn_logits / max_attn_val)  # soft-cap at ±30
+
+# Softmax in float32 even when forward pass is bfloat16
+attn_weights = jax.nn.softmax(attn_logits).astype(query.dtype)
+```
+
+The `attn_output_multiplier=0.125` pre-scales logits before capping, acting as temperature control. Combined with tanh capping at 30.0, this prevents attention entropy collapse that would otherwise destabilize small models running in bfloat16.
+
+**JAX XLA compilation.** All inference functions are compiled to fused XLA kernels via `hk.without_apply_rng(hk.transform(...))`. No Python overhead at inference time — the compiled graph runs directly on GPU.
+
+**Request batching.** The runner's `bs_per_device` parameter batches multiple users' requests into a single GPU forward pass. The batch size scales with number of available GPU devices: `batch_size = max(1, int(bs_per_device × num_gpus))`.
+
+The result: a forward pass through this model on a modern GPU takes single-digit milliseconds even for a batch of users. Scaled across many GPU servers in parallel, the service handles X's request volume within the ~100ms feed latency budget.
+
+### What happens when a service goes down?
+
+The pipeline framework's error handling (Part 2) ensures graceful degradation at every level:
+
+| Service down | Effect | Result |
+|---|---|---|
+| **Phoenix Retrieval** | `PhoenixSource` returns error → zero out-of-network candidates | Feed falls back to Thunder only (in-network, thinner) |
+| **Thunder** | `ThunderSource` returns error → zero in-network candidates | Feed falls back to Phoenix only (out-of-network) |
+| **UAS** | `user_action_sequence` missing → `PhoenixSource` errors | Same as Phoenix down |
+| **Both sources** | Zero candidates enter pipeline | Empty feed returned |
+
+Thunder's in-memory store is rebuilt from Kafka on restart. With a 2-day retention window and consumer offset tracking, a restarting Thunder service replays recent events and catches up automatically — it only misses posts published during the downtime window.
+
+---
+
+## Two Sources, One Feed
+
+Putting it together, here's what the `ThunderSource` and `PhoenixSource` return to `HomeMixer`:
+
+```
+ThunderSource result:
+  ~100 posts, marked served_type = ForYouInNetwork
+  - from accounts you follow
+  - most recent first
+  - conversation-filtered
+
+PhoenixSource result:
+  ~100 posts, marked served_type = ForYouPhoenixRetrieval
+  - from the global corpus
+  - selected by embedding similarity to your history
+  - no social graph constraint
+
+Combined: ~200 candidates passed to hydration
+```
+
+The split matters for downstream scoring. The `OONScorer` (Part 5) treats out-of-network candidates differently, applying a weight factor to balance in-network and out-of-network content in the final feed.
+
+## What's Next
+
+With ~200 candidates in hand, the pipeline moves to ranking. That means the Phoenix ranking model — a Grok-based transformer that reads your engagement history and predicts 18 engagement probabilities for each candidate.
+
+- **[Part 4](/blog/x-algorithm-part-4)**: The ranking transformer — Grok architecture, candidate isolation masking, and multi-action prediction.
+- **[Part 5](/blog/x-algorithm-part-5)**: Scoring, filtering, and the final ranked feed.

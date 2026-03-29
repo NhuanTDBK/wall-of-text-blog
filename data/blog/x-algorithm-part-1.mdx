@@ -1,0 +1,250 @@
+---
+title: 'X Algorithm Part 1: What Happens When You Pull to Refresh'
+date: '2026-03-28'
+tags: ['x-algorithm', 'recommendation-system', 'machine-learning', 'system-design']
+draft: false
+summary: 'X open-sourced their For You feed recommendation algorithm. This is Part 1 of a deep dive into how it works — from the four-codebase architecture to the full pipeline overview, and the one surprising design choice that changes everything.'
+authors: ['default']
+---
+
+# X Algorithm Part 1: What Happens When You Pull to Refresh
+
+This is **Part 1** of a 5-part series on the X recommendation algorithm. [Part 2](/blog/x-algorithm-part-2) covers the composable pipeline framework in Rust. [Part 3](/blog/x-algorithm-part-3) covers candidate sourcing with Thunder and Phoenix Retrieval. [Part 4](/blog/x-algorithm-part-4) dives into the Grok-based ranking transformer. [Part 5](/blog/x-algorithm-part-5) covers scoring, filtering, and the final ranked feed.
+
+---
+
+Every time you pull to refresh your For You feed on X, a pipeline evaluates hundreds of candidate posts — filtering, hydrating, scoring, and ranking them — in roughly 100 milliseconds. The result is a personalized list of ~40 posts chosen from a global corpus of billions.
+
+In early 2025, X open-sourced the core of this system. The code is real, production-grade, and surprisingly clean. This series is a ground-up walkthrough of how it works.
+
+Let's start at the top.
+
+## The Core Problem
+
+Recommendation is fundamentally a two-part problem:
+
+1. **Retrieval**: From billions of candidate posts, find hundreds that are plausibly relevant to this user.
+2. **Ranking**: From those hundreds, pick the ~40 that will actually delight them — in the right order.
+
+The naïve approach — score every post for every user — is impossibly expensive. Modern recommendation systems solve this by chaining a fast-but-imprecise retrieval stage with a slow-but-accurate ranking stage. X's algorithm is a textbook example of this pattern, executed at enormous scale.
+
+## The Four Codebases
+
+The open-source release consists of four components, each with a distinct role:
+
+```
+x-algorithm/
+├── candidate-pipeline/   # Reusable pipeline framework (Rust)
+├── home-mixer/           # Orchestration layer — the main service (Rust)
+├── phoenix/              # ML models: retrieval + ranking (Python/JAX)
+└── thunder/              # In-memory post store for in-network content (Rust)
+```
+
+**`home-mixer/`** is the heart of the system. It exposes a gRPC endpoint (`ScoredPostsService`) that accepts a user request and returns a ranked list of posts. Everything else is a dependency it calls.
+
+**`thunder/`** is an in-memory post store. It consumes post create/delete events from Kafka in real time and maintains per-user indexes so it can answer "what have the 500 people this user follows posted recently?" in under a millisecond.
+
+**`phoenix/`** contains the ML models — both the retrieval model (finds out-of-network posts via embedding similarity) and the ranking model (scores all candidates using a Grok-based transformer). Written in Python with JAX.
+
+**`candidate-pipeline/`** is a reusable trait-based framework that defines the stages of a recommendation pipeline in abstract terms. `home-mixer/` plugs its concrete implementations into this framework.
+
+The language split is deliberate: Rust handles the latency-sensitive serving layer; Python/JAX handles the ML models where the ecosystem is richer.
+
+## The Pipeline at 30,000 Feet
+
+When a user opens their For You feed, here's what happens:
+
+```
+User request (user_id, seen_ids, served_ids)
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│                     QUERY HYDRATION                        │
+│         sub-components run in parallel (join_all)          │
+│  ┌─────────────────────────┐  ┌────────────────────────┐   │
+│  │  UserActionSeq Hydrator │  │ UserFeatures Hydrator  │   │
+│  │  (engagement history)   │  │ (following list, etc.) │   │
+│  └─────────────────────────┘  └────────────────────────┘   │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│                   CANDIDATE SOURCING                       │
+│         sub-components run in parallel (join_all)          │
+│  ┌─────────────────────────┐  ┌────────────────────────┐   │
+│  │        THUNDER          │  │   PHOENIX RETRIEVAL    │   │
+│  │     (In-Network)        │  │   (Out-of-Network)     │   │
+│  │  Posts from accounts    │  │  ML similarity search  │   │
+│  │  you follow — ~100      │  │  across corpus — ~100  │   │
+│  └─────────────────────────┘  └────────────────────────┘   │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼ (~200 candidates combined)
+┌────────────────────────────────────────────────────────────┐
+│                  CANDIDATE HYDRATION                       │
+│         sub-components run in parallel (join_all)          │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────────┐   │
+│  │InNetwork │ │CoreData  │ │  Video   │ │Subscription │   │
+│  │Hydrator  │ │Hydrator  │ │ Duration │ │  Hydrator   │   │
+│  └──────────┘ └──────────┘ └──────────┘ └─────────────┘   │
+│                       + Gizmoduck (author info)            │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│               PRE-SCORING FILTERS (10)                     │
+│              run one by one, sequentially                  │
+│  DropDuplicates → CoreDataCheck → Age → SelfPost →         │
+│  RetweetDedup → Subscription → SeenPosts → ServedPosts →   │
+│  MutedKeyword → BlockedAuthor                              │
+│                    ~200 → ~168 candidates                  │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│                     SCORING (4)                            │
+│              run one by one, sequentially                  │
+│  PhoenixScorer → WeightedScorer → AuthorDiversity → OON   │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│                    TOP-K SELECTION                         │
+│            Sort by final score, select top ~50             │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│               POST-SELECTION FILTERS (2)                   │
+│         VFFilter → DedupConversationFilter                 │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼
+  ~40 ranked posts returned
+```
+
+Three design choices jump out:
+
+- **Parallel within stages**: The pipeline stages themselves run one after another (you can't source candidates before the query is hydrated). But *inside* each stage, sub-components run concurrently via `join_all` — both query hydrators fetch data simultaneously, Thunder and Phoenix query at the same time, all 5 hydrators enrich candidates in parallel.
+- **Sequential where order matters**: Filters and scorers are applied one by one. Each filter sees the output of the previous; each scorer builds on the scores set before it.
+- **Asymmetric depth**: The pipeline starts wide (~200 candidates) and narrows aggressively before the expensive ML scoring step.
+
+## The One Surprising Thing
+
+If you read one thing before the rest of this series, make it this:
+
+> **There are zero hand-engineered features in this system.**
+
+The README says it plainly:
+
+> *"We have eliminated every single hand-engineered feature and most heuristics from the system. The Grok-based transformer does all the heavy lifting."*
+
+Traditional recommendation systems are full of manually crafted signals: follower count, like rate, average engagement velocity, time-decay functions, topic affinity scores. Each feature requires domain expertise to design, data pipelines to compute, and ongoing maintenance as the world changes.
+
+X's system replaces all of that with a single Grok-based transformer. The model sees your engagement history — what you liked, replied to, shared, dwelled on — and learns what patterns predict future engagement. No features are handed to it. It discovers them.
+
+The only "features" in the system are hash IDs (for users, posts, and authors) and action type encodings (like, reply, repost, etc.). Everything else is learned.
+
+To be precise about what's excluded — the `RecsysBatch` that goes into the ranking transformer contains:
+
+```python
+class RecsysBatch(NamedTuple):
+    user_hashes: ...               # Hash IDs of the user
+    history_post_hashes: ...       # Hash IDs of posts in engagement history
+    history_author_hashes: ...     # Hash IDs of authors in engagement history
+    history_actions: ...           # Action types: like, reply, repost, etc.
+    history_product_surface: ...   # Where the engagement happened (app surface)
+    candidate_post_hashes: ...     # Hash IDs of candidate posts
+    candidate_author_hashes: ...   # Hash IDs of candidate authors
+    candidate_product_surface: ... # Surface for candidates
+```
+
+No post text. No user age, gender, or location. No follower counts. No topic labels. No content embeddings. Two bets rolled into one:
+
+**Against user demographics**: The model doesn't know if you're 25 or 55, where you live, or what language you prefer. Two users with identical engagement histories are scored identically.
+
+**Against content features**: The model never reads what a post says. A post is just a hash ID — a learned embedding updated through training based on how users engage with it. The model learns "posts like this get liked by users like this" purely from co-engagement patterns, not from understanding the words.
+
+### The Pros
+
+**Simpler data pipelines.** No feature engineering means no feature stores, no ETL jobs computing follower velocity or topic affinity scores, no schema migrations when you add a new signal. The only pipeline is: record engagements → train transformer.
+
+**Self-updating relevance.** Hand-engineered features encode assumptions that go stale. "Verified accounts are higher quality" breaks when verification becomes a paid product. A transformer learns current patterns from current data — no engineer needs to update a formula.
+
+**Emergent cross-signal understanding.** A transformer can discover that users who like long-form threads about distributed systems also tend to dwell on posts about Rust — a correlation no feature engineer would think to hard-code.
+
+### The Cons
+
+**Cold-start blindness.** A brand new post has no engagement history, so its hash embedding is random noise. A new user with no history gives the model nothing to work from. Both are real problems at X's scale, and the open-source release doesn't show how they're handled — likely with separate fallback systems.
+
+**Opaque failures.** When a hand-engineered feature produces a bad result, you can inspect the feature value and trace why. When the transformer produces a bad ranking, you're staring at embedding vectors. Debugging is significantly harder.
+
+**Scale dependency.** This approach needs massive engagement data to work. The transformer has to see enough co-engagement patterns to learn meaningful embeddings. A smaller platform without X's data volume couldn't run this architecture and expect good results.
+
+**Content-agnostic by design.** The model has no idea what a post says. It can't distinguish between two posts from the same author with the same engagement history if one is thoughtful analysis and the other is misinformation. Content quality signals have to come from somewhere else — likely the trust and safety layer that runs post-selection.
+
+This is a significant architectural bet. It's also a statement about where production ML is heading: when you have enough data and compute, learned representations beat hand-crafted features.
+
+## What's in a Request
+
+To make this concrete, let's look at what a feed request actually contains. The `ScoredPostsQuery` struct that flows through the pipeline carries:
+
+```rust
+pub struct ScoredPostsQuery {
+    pub user_id: i64,
+    pub client_app_id: i32,
+    pub country_code: String,
+    pub language_code: String,
+    pub seen_ids: Vec<i64>,           // Posts user has already seen
+    pub served_ids: Vec<i64>,         // Posts served in recent sessions
+    pub in_network_only: bool,
+    pub is_bottom_request: bool,      // Pagination
+    pub user_action_sequence: Option<UserActionSequence>,  // Engagement history
+    pub user_features: UserFeatures,  // Following list, preferences
+    pub request_id: String,
+}
+```
+
+The two most important fields:
+
+- **`seen_ids` / `served_ids`**: Used by the `PreviouslySeenPostsFilter` and `PreviouslyServedPostsFilter` to avoid reshowing content the user has already encountered. These make the feed feel fresh on every refresh.
+- **`user_action_sequence`**: The user's recent engagement history — likes, replies, reposts, with timestamps. This is the primary input to the Phoenix ranking model. It's what the transformer reads to understand "what does this person care about?"
+
+## The Flow With Sample Data
+
+To make the pipeline tangible, here's a mini trace of a single request:
+
+**User 12345 pulls to refresh.** They follow 500 accounts. They've seen posts `[9001, 9002, 9003]` before.
+
+**Query hydration** (parallel):
+- UAS service returns their last 128 engagements: liked post 8001 (3h ago), replied to post 8002 (5h ago), reposted post 8003 (8h ago)...
+- Strato service returns their following list: [201, 202, 203, ... (500 accounts)]
+
+**Candidate sourcing** (parallel):
+- Thunder scans in-memory indexes for all 500 followed accounts → returns ~100 recent posts
+- Phoenix Retrieval encodes the user's history into an embedding, does nearest-neighbor search → returns ~100 out-of-network posts
+
+**200 candidates** enter the filter chain. After 10 sequential filters (duplicates, age checks, self-posts, blocked authors, muted keywords, etc.), **~168 remain**.
+
+Those 168 candidates go through the Grok transformer. Each gets 18+ engagement probability predictions. A weighted combination produces a final score. After diversity adjustments and selection, the user sees **~40 ranked posts**.
+
+## Why This Architecture?
+
+A few things to notice about the design philosophy:
+
+**Availability over correctness in error handling.** If a hydrator fails (say, the Gizmoduck author service is slow), the pipeline continues with the data it has — candidates just won't have author info populated. If a filter crashes, the pipeline falls back to the pre-filter candidate list. The feed degrades gracefully rather than erroring.
+
+**Composability over monoliths.** The `CandidatePipeline` trait is a generic framework. Adding a new filter, scorer, or data source means implementing a trait and registering it — no changes to the orchestration logic. This matters when you're running hundreds of A/B experiments at once.
+
+**Two sources, not one.** The split between Thunder (in-network, sub-millisecond) and Phoenix Retrieval (out-of-network, ML-based) is important. Without Thunder, users with small following lists get a thin in-network feed. Without Phoenix Retrieval, the feed can't surface content from outside your social graph — which is where most discovery happens.
+
+## What's Next
+
+This post gave you the map. The next four parts zoom in on each component:
+
+- **[Part 2](/blog/x-algorithm-part-2)**: The `CandidatePipeline` trait system in Rust — how the framework enforces parallelism, handles errors, and makes the pipeline composable.
+- **[Part 3](/blog/x-algorithm-part-3)**: Thunder's in-memory post store and Phoenix's two-tower retrieval model — how ~200 candidates are found.
+- **[Part 4](/blog/x-algorithm-part-4)**: The Phoenix ranking transformer — Grok architecture, candidate isolation masking, and multi-action prediction.
+- **[Part 5](/blog/x-algorithm-part-5)**: The four-scorer chain, the 10 pre-scoring filters, and how it all becomes a ranked feed.
+
+If you want to follow along in the code, the repository is [open on GitHub](https://github.com/xai-org/x-algorithm).
