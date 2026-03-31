@@ -1,7 +1,11 @@
 {
+  "graph": 1,
+  "embedding": 1,
+  "machine-learning": 5,
+  "recommendation-system": 5,
+  "pytorch": 1,
   "ai": 2,
   "llm": 1,
-  "machine-learning": 4,
   "vibe-coding": 3,
   "claude-code": 3,
   "side-project": 1,
@@ -11,7 +15,6 @@
   "deployment": 1,
   "aws": 1,
   "x-algorithm": 4,
-  "recommendation-system": 4,
   "system-design": 2,
   "rust": 2,
   "transformer": 1
