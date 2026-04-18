@@ -1,0 +1,928 @@
+---
+title: 'X Algorithm Part 5: Scoring, Filtering, and the Final Feed'
+date: '2026-04-03'
+tags: ['x-algorithm', 'recommendation-system', 'system-design', 'rust']
+draft: false
+summary: 'How X transforms raw ML predictions into a polished, personalized feed — the four-scorer chain, 10 pre-scoring filters, and the waterfall that reduces ~200 candidates to ~40 ranked posts.'
+authors: ['default']
+---
+
+# X Algorithm Part 5: Scoring, Filtering, and the Final Feed
+
+This is **Part 5** of a 5-part series on the X recommendation algorithm. [Part 1](/blog/x-algorithm-part-1) covers the big-picture overview. [Part 2](/blog/x-algorithm-part-2) covers the pipeline framework. [Part 3](/blog/x-algorithm-part-3) covers candidate sourcing. [Part 4](/blog/x-algorithm-part-4) dives into the ranking transformer.
+
+---
+
+## TL;DR
+
+After sourcing ~200 candidates from Thunder and Phoenix, X's recommendation pipeline transforms them into ~40 ranked posts through a waterfall of filters, scorers, and selections:
+
+```
+~200 candidates
+    │
+    ▼
+Pre-Scoring Filters (10)
+  → duplicates, age, self-posts,
+     blocked authors, muted keywords...
+    │
+    ▼
+~168 candidates
+    │
+    ▼
+Scoring Pipeline (4)
+  → Phoenix (ML predictions)
+  → Weighted (weighted combination)
+  → Diversity (exponential decay)
+  → OON (in-network bias)
+    │
+    ▼
+TopK Selection (~50)
+    │
+    ▼
+Post-Selection Filters (2)
+  → visibility filtering
+  → conversation dedup
+    │
+    ▼
+🎯 ~40 ranked posts
+```
+
+**Key stages:**
+- **10 pre-scoring filters**: Remove ineligible content (duplicates, too old, blocked authors, muted keywords, etc.)
+- **4-stage scoring**: PhoenixScorer (ML predictions) → WeightedScorer (weighted combination) → AuthorDiversityScorer (exponential decay) → OONScorer (in-network bias)
+- **Selection + post-filtering**: Pick top ~50, then apply visibility filtering and conversation deduplication
+- **Result**: ~40 personalized, diverse, safe posts delivered in ~100ms
+
+---
+
+## Table of Contents
+
+- [The Four-Stage Scoring Pipeline](#the-four-stage-scoring-pipeline)
+  - [Stage 1: PhoenixScorer — Raw ML Predictions](#stage-1-phoenixscorer--raw-ml-predictions)
+  - [Stage 2: WeightedScorer — Combining Signals](#stage-2-weightedscorer--combining-signals)
+  - [Stage 3: AuthorDiversityScorer — Preventing Author Spam](#stage-3-authordiversityscorer--preventing-author-spam)
+  - [Stage 4: OONScorer — Prioritizing In-Network Content](#stage-4-oonscorer--prioritizing-in-network-content)
+- [Pre-Scoring Filters (10 Sequential Guards)](#pre-scoring-filters-10-sequential-guards)
+  - [Filter 1: DropDuplicatesFilter](#filter-1-dropduplicatesfilter)
+  - [Filter 2: CoreDataHydrationFilter](#filter-2-coredatahydrationfilter)
+  - [Filter 3: AgeFilter](#filter-3-agefilter)
+  - [Filter 4: SelfTweetFilter](#filter-4-selftweetfilter)
+  - [Filter 5: RetweetDeduplicationFilter](#filter-5-retweetdeduplicationfilter)
+  - [Filter 6: IneligibleSubscriptionFilter](#filter-6-ineligiblesubscriptionfilter)
+  - [Filter 7: PreviouslySeenPostsFilter](#filter-7-previouslyseenpostsfilter)
+  - [Filter 8: PreviouslyServedPostsFilter](#filter-8-previouslyservedpostsfilter)
+  - [Filter 9: MutedKeywordFilter](#filter-9-mutedkeywordfilter)
+  - [Filter 10: AuthorSocialgraphFilter](#filter-10-authorsocialgraphfilter)
+- [Selection and Post-Selection](#selection-and-post-selection)
+  - [TopKScoreSelector](#topkscoreselector)
+  - [VFFilter — Visibility Filtering](#vffilter--visibility-filtering)
+  - [DedupConversationFilter](#dedupconversationfilter)
+- [Side Effects: Async Bookkeeping](#side-effects-async-bookkeeping)
+- [The Waterfall: From ~200 to ~40](#the-waterfall-from-200-to-40)
+- [Key Insights](#key-insights)
+  - [Tunable Weights Enable Rapid Experimentation](#tunable-weights-enable-rapid-experimentation)
+  - [Filter Chain is Defensive Programming](#filter-chain-is-defensive-programming)
+  - [Author Diversity is Simple but Effective](#author-diversity-is-simple-but-effective)
+  - [Side Effects Enable Future Optimizations](#side-effects-enable-future-optimizations)
+- [What This Tells Us About Modern RecSys](#what-this-tells-us-about-modern-recsys)
+
+---
+
+After sourcing ~200 candidates from Thunder and Phoenix, we need to rank and filter them down to ~40 posts. This is where raw ML predictions become a polished, personalized feed.
+
+The pipeline here is a waterfall: candidates flow through filters, then through scorers, then through selection, then through more filters. At each stage, the candidate count shrinks. The final result is a ranked list of posts that are relevant, diverse, fresh, and safe.
+
+## The Four-Stage Scoring Pipeline
+
+Scoring happens after pre-scoring filters have removed obviously ineligible candidates. The remaining ~168 candidates go through four scorers in sequence, each building on the previous stage's output.
+
+### Stage 1: PhoenixScorer — Raw ML Predictions
+
+[`home-mixer/scorers/phoenix_scorer.rs:17-72`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/phoenix_scorer.rs#L17-L72)
+
+```rust
+pub struct PhoenixScorer {
+    pub phoenix_client: Arc<dyn PhoenixPredictionClient + Send + Sync>,
+}
+
+async fn score(
+    &self,
+    query: &ScoredPostsQuery,
+    candidates: &[PostCandidate],
+) -> Result<Vec<PostCandidate>, String> {
+    let user_id = query.user_id as u64;
+    let prediction_request_id = request_util::generate_request_id();
+
+    if let Some(sequence) = &query.user_action_sequence {
+        let tweet_infos: Vec<xai_recsys_proto::TweetInfo> = candidates
+            .iter()
+            .map(|c| {
+                let tweet_id = c.retweeted_tweet_id.unwrap_or(c.tweet_id as u64);
+                let author_id = c.retweeted_user_id.unwrap_or(c.author_id);
+                xai_recsys_proto::TweetInfo {
+                    tweet_id,
+                    author_id,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let result = self.phoenix_client.predict(user_id, sequence.clone(), tweet_infos).await;
+
+        if let Ok(response) = result {
+            let predictions_map = self.build_predictions_map(&response);
+
+            let scored_candidates = candidates
+                .iter()
+                .map(|c| {
+                    let lookup_tweet_id = c.retweeted_tweet_id.unwrap_or(c.tweet_id as u64);
+                    let phoenix_scores = predictions_map
+                        .get(&lookup_tweet_id)
+                        .map(|preds| self.extract_phoenix_scores(preds))
+                        .unwrap_or_default();
+
+                    PostCandidate {
+                        phoenix_scores,
+                        prediction_request_id: Some(prediction_request_id),
+                        last_scored_at_ms,
+                        ..Default::default()
+                    }
+                })
+                .collect();
+
+            return Ok(scored_candidates);
+        }
+    }
+
+    Ok(candidates.to_vec())
+}
+```
+
+`PhoenixScorer` calls the Grok transformer (covered in [Part 4](/blog/x-algorithm-part-4)) and receives 19 action probabilities per candidate. The `phoenix_scores` field stores these:
+
+[`home-mixer/scorers/phoenix_scorer.rs:121-141`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/phoenix_scorer.rs#L121-L141)
+
+```rust
+fn extract_phoenix_scores(&self, p: &ActionPredictions) -> PhoenixScores {
+    PhoenixScores {
+        favorite_score: p.get(ActionName::ServerTweetFav),
+        reply_score: p.get(ActionName::ServerTweetReply),
+        retweet_score: p.get(ActionName::ServerTweetRetweet),
+        photo_expand_score: p.get(ActionName::ClientTweetPhotoExpand),
+        click_score: p.get(ActionName::ClientTweetClick),
+        profile_click_score: p.get(ActionName::ClientTweetClickProfile),
+        vqv_score: p.get(ActionName::ClientTweetVideoQualityView),
+        share_score: p.get(ActionName::ClientTweetShare),
+        share_via_dm_score: p.get(ActionName::ClientTweetClickSendViaDirectMessage),
+        share_via_copy_link_score: p.get(ActionName::ClientTweetShareViaCopyLink),
+        dwell_score: p.get(ActionName::ClientTweetRecapDwelled),
+        quote_score: p.get(ActionName::ServerTweetQuote),
+        quoted_click_score: p.get(ActionName::ClientQuotedTweetClick),
+        follow_author_score: p.get(ActionName::ClientTweetFollowAuthor),
+        not_interested_score: p.get(ActionName::ClientTweetNotInterestedIn),
+        block_author_score: p.get(ActionName::ClientTweetBlockAuthor),
+        mute_author_score: p.get(ActionName::ClientTweetMuteAuthor),
+        report_score: p.get(ActionName::ClientTweetReport),
+        dwell_time: p.get_continuous(ContinuousActionName::DwellTime),
+    }
+}
+```
+
+Key implementation detail: for retweets, the scorer looks up predictions using the **original tweet ID** (`retweeted_tweet_id`), not the retweet ID. This ensures that a retweet and its original post receive the same ML predictions — they're the same content, just redistributed.
+
+### Stage 2: WeightedScorer — Combining Signals
+
+[`home-mixer/scorers/weighted_scorer.rs:46-77`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/weighted_scorer.rs#L46-L77)
+
+```rust
+fn compute_weighted_score(candidate: &PostCandidate) -> f64 {
+    let s: &PhoenixScores = &candidate.phoenix_scores;
+
+    let vqv_weight = Self::vqv_weight_eligibility(candidate);
+
+    let combined_score = Self::apply(s.favorite_score, p::FAVORITE_WEIGHT)
+        + Self::apply(s.reply_score, p::REPLY_WEIGHT)
+        + Self::apply(s.retweet_score, p::RETWEET_WEIGHT)
+        + Self::apply(s.photo_expand_score, p::PHOTO_EXPAND_WEIGHT)
+        + Self::apply(s.click_score, p::CLICK_WEIGHT)
+        + Self::apply(s.profile_click_score, p::PROFILE_CLICK_WEIGHT)
+        + Self::apply(s.vqv_score, vqv_weight)
+        + Self::apply(s.share_score, p::SHARE_WEIGHT)
+        + Self::apply(s.share_via_dm_score, p::SHARE_VIA_DM_WEIGHT)
+        + Self::apply(s.share_via_copy_link_score, p::SHARE_VIA_COPY_LINK_WEIGHT)
+        + Self::apply(s.dwell_score, p::DWELL_WEIGHT)
+        + Self::apply(s.quote_score, p::QUOTE_WEIGHT)
+        + Self::apply(s.quoted_click_score, p::QUOTED_CLICK_WEIGHT)
+        + Self::apply(s.dwell_time, p::CONT_DWELL_TIME_WEIGHT)
+        + Self::apply(s.follow_author_score, p::FOLLOW_AUTHOR_WEIGHT)
+        + Self::apply(s.not_interested_score, p::NOT_INTERESTED_WEIGHT)
+        + Self::apply(s.block_author_score, p::BLOCK_AUTHOR_WEIGHT)
+        + Self::apply(s.mute_author_score, p::MUTE_AUTHOR_WEIGHT)
+        + Self::apply(s.report_score, p::REPORT_WEIGHT);
+
+    Self::offset_score(combined_score)
+}
+```
+
+The formula is straightforward: `score = Σ(weight_i × P(action_i))`. Each action probability from the transformer gets multiplied by a configured weight, then summed.
+
+**Positive weights** reward engagement: favorites, replies, retweets, clicks, shares, dwells. The weights for these are typically small positive numbers (1.0, 2.0, etc.).
+
+**Negative weights** penalize negative signals: block, mute, report. These are typically large negative numbers (around -74.0). The idea is that a 1% chance of blocking a post should significantly outweigh a 50% chance of liking it — the cost of showing something offensive is higher than the benefit of showing something mildly interesting.
+
+**Special handling for video**: VQV (video quality view) weight only applies if the video is longer than `MIN_VIDEO_DURATION_MS`:
+
+[`home-mixer/scorers/weighted_scorer.rs:79-85`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/weighted_scorer.rs#L79-L85)
+
+```rust
+fn vqv_weight_eligibility(candidate: &PostCandidate) -> f64 {
+    if candidate
+        .video_duration_ms
+        .is_some_and(|ms| ms > p::MIN_VIDEO_DURATION_MS)
+    {
+        p::VQV_WEIGHT
+    } else {
+        0.0
+    }
+}
+```
+
+**The offset method**: Negative combined scores are problematic for sorting — they'd appear at the bottom of the feed even if they're the best candidates. The offset remaps everything to positive:
+
+[`home-mixer/scorers/weighted_scorer.rs:87-93`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/weighted_scorer.rs#L87-L93)
+
+```rust
+fn offset_score(combined_score: f64) -> f64 {
+    if p::WEIGHTS_SUM == 0.0 {
+        combined_score.max(0.0)
+    } else if combined_score < 0.0 {
+        (combined_score + p::NEGATIVE_WEIGHTS_SUM) / p::WEIGHTS_SUM * p::NEGATIVE_SCORES_OFFSET
+    } else {
+        combined_score + p::NEGATIVE_SCORES_OFFSET
+    }
+}
+```
+
+If `combined_score` is negative, it's shifted up by `NEGATIVE_SCORES_OFFSET` (scaled appropriately). If it's already positive, it's shifted up by the same amount. This preserves relative ordering while ensuring all scores are positive for sorting.
+
+The result is stored in the `weighted_score` field.
+
+### Stage 3: AuthorDiversityScorer — Preventing Author Spam
+
+[`home-mixer/scorers/author_diversity_scorer.rs:12-56`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/author_diversity_scorer.rs#L12-L56)
+
+```rust
+pub struct AuthorDiversityScorer {
+    decay_factor: f64,
+    floor: f64,
+}
+
+async fn score(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: &[PostCandidate],
+) -> Result<Vec<PostCandidate>, String> {
+    let mut author_counts: HashMap<u64, usize> = HashMap::new();
+    let mut scored = vec![PostCandidate::default(); candidates.len()];
+
+    let mut ordered: Vec<(usize, &PostCandidate)> = candidates.iter().enumerate().collect();
+    ordered.sort_by(|(_, a), (_, b)| {
+        let a_score = a.weighted_score.unwrap_or(f64::NEG_INFINITY);
+        let b_score = b.weighted_score.unwrap_or(f64::NEG_INFINITY);
+        b_score.partial_cmp(&a_score).unwrap_or(Ordering::Equal)
+    });
+
+    for (original_idx, candidate) in ordered {
+        let entry = author_counts.entry(candidate.author_id).or_insert(0);
+        let position = *entry;
+        *entry += 1;
+
+        let multiplier = self.multiplier(position);
+        let adjusted_score = candidate.weighted_score.map(|score| score * multiplier);
+
+        let updated = PostCandidate {
+            score: adjusted_score,
+            ..Default::default()
+        };
+        scored[original_idx] = updated;
+    }
+
+    Ok(scored)
+}
+
+fn multiplier(&self, position: usize) -> f64 {
+    (1.0 - self.floor) * self.decay_factor.powf(position as f64) + self.floor
+}
+```
+
+The scorer first sorts candidates by `weighted_score` (descending). Then it iterates through the sorted list, tracking how many times each author has appeared so far. For each occurrence, it applies an exponential decay multiplier:
+
+```
+multiplier = (1 - floor) × decay^position + floor
+```
+
+With typical values `floor=0.3` and `decay=0.5`:
+- Position 0 (first post by author): `multiplier = 0.7 × 1.0 + 0.3 = 1.0` (no penalty)
+- Position 1 (second post by author): `multiplier = 0.7 × 0.5 + 0.3 = 0.65` (35% penalty)
+- Position 2 (third post by author): `multiplier = 0.7 × 0.25 + 0.3 = 0.475` (52.5% penalty)
+
+The floor ensures that even repeated authors get some visibility — a post by an author who's already appeared 10 times still gets 30% of its original score.
+
+The adjusted score is stored in the `score` field, which is what downstream stages use for sorting.
+
+### Stage 4: OONScorer — Prioritizing In-Network Content
+
+[`home-mixer/scorers/oon_scorer.rs:10-33`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/oon_scorer.rs#L10-L33)
+
+```rust
+pub struct OONScorer;
+
+async fn score(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: &[PostCandidate],
+) -> Result<Vec<PostCandidate>, String> {
+    let scored = candidates
+        .iter()
+        .map(|c| {
+            let updated_score = c.score.map(|base_score| match c.in_network {
+                Some(false) => base_score * p::OON_WEIGHT_FACTOR,
+                _ => base_score,
+            });
+
+            PostCandidate {
+                score: updated_score,
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    Ok(scored)
+}
+```
+
+This is the simplest scorer. If a candidate is out-of-network (`in_network: false`), its score is multiplied by `OON_WEIGHT_FACTOR` (typically a value < 1.0, like 0.5). In-network candidates are unchanged.
+
+The effect is subtle but important: out-of-network posts need to be significantly better than in-network posts to compete for the same slot. This biases the feed toward content from people you follow, while still allowing discovery from outside your social graph.
+
+## Pre-Scoring Filters (10 Sequential Guards)
+
+Before scoring, ~200 candidates flow through 10 filters that remove obviously ineligible posts. Each filter sees the output of the previous one.
+
+### Filter 1: DropDuplicatesFilter
+
+[`home-mixer/filters/drop_duplicates_filter.rs:12-35`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/drop_duplicates_filter.rs#L12-L35)
+
+```rust
+pub struct DropDuplicatesFilter;
+
+async fn filter(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let mut seen_ids = HashSet::new();
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+
+    for candidate in candidates {
+        if seen_ids.insert(candidate.tweet_id) {
+            kept.push(candidate);
+        } else {
+            removed.push(candidate);
+        }
+    }
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Removes duplicate tweet IDs using a HashSet. The first occurrence is kept; subsequent duplicates are removed. This can happen if both Thunder and Phoenix return the same post.
+
+### Filter 2: CoreDataHydrationFilter
+
+[`home-mixer/filters/core_data_hydration_filter.rs:12-26`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/core_data_hydration_filter.rs#L12-L26)
+
+```rust
+pub struct CoreDataHydrationFilter;
+
+async fn filter(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let (kept, removed) = candidates
+        .into_iter()
+        .partition(|c| c.author_id != 0 && !c.tweet_text.trim().is_empty());
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Drops candidates with `author_id == 0` (failed author hydration) or empty `tweet_text` (failed content hydration). This ensures basic data integrity before expensive ML scoring.
+
+### Filter 3: AgeFilter
+
+[`home-mixer/filters/age_filter.rs:12-37`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/age_filter.rs#L12-L37)
+
+```rust
+pub struct AgeFilter {
+    pub max_age: Duration,
+}
+
+fn is_within_age(&self, tweet_id: i64) -> bool {
+    snowflake::duration_since_creation_opt(tweet_id)
+        .map(|age| age <= self.max_age)
+        .unwrap_or(false)
+}
+
+async fn filter(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let (kept, removed): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| self.is_within_age(c.tweet_id));
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Removes tweets older than `max_age` (a configured `Duration`). Uses the Snowflake ID to extract the creation timestamp without querying a database. This enforces recency — the feed only shows recent posts.
+
+### Filter 4: SelfTweetFilter
+
+[`home-mixer/filters/self_tweet_filter.rs:12-28`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/self_tweet_filter.rs#L12-L28)
+
+```rust
+pub struct SelfTweetFilter;
+
+async fn filter(
+    &self,
+    query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let viewer_id = query.user_id as u64;
+    let (kept, removed): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| c.author_id != viewer_id);
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Removes tweets where `author_id == viewer_id`. Don't show your own posts in your feed — you can see them on your profile.
+
+### Filter 5: RetweetDeduplicationFilter
+
+[`home-mixer/filters/retweet_deduplication_filter.rs:12-48`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/retweet_deduplication_filter.rs#L12-L48)
+
+```rust
+pub struct RetweetDeduplicationFilter;
+
+async fn filter(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let mut seen_tweet_ids: HashSet<u64> = HashSet::new();
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+
+    for candidate in candidates {
+        match candidate.retweeted_tweet_id {
+            Some(retweeted_id) => {
+                if seen_tweet_ids.insert(retweeted_id) {
+                    kept.push(candidate);
+                } else {
+                    removed.push(candidate);
+                }
+            }
+            None => {
+                seen_tweet_ids.insert(candidate.tweet_id as u64);
+                kept.push(candidate);
+            }
+        }
+    }
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Keeps only the first occurrence of a tweet, whether as an original or as a retweet. If we've already seen the original post, any retweets of it are removed. If we've already seen a retweet, the original or other retweets are removed. This prevents showing the same content multiple times.
+
+### Filter 6: IneligibleSubscriptionFilter
+
+[`home-mixer/filters/ineligible_subscription_filter.rs:12-36`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/ineligible_subscription_filter.rs#L12-L36)
+
+```rust
+pub struct IneligibleSubscriptionFilter;
+
+async fn filter(
+    &self,
+    query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let subscribed_user_ids: HashSet<u64> = query
+        .user_features
+        .subscribed_user_ids
+        .iter()
+        .map(|id| *id as u64)
+        .collect();
+
+    let (kept, removed): (Vec<_>, Vec<_>) =
+        candidates
+            .into_iter()
+            .partition(|candidate| match candidate.subscription_author_id {
+                Some(author_id) => subscribed_user_ids.contains(&author_id),
+                None => true,
+            });
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Filters out paywalled posts from authors the viewer is not subscribed to. If a post has `subscription_author_id` set, the filter checks if the viewer is subscribed to that author. If not, the post is removed.
+
+### Filter 7: PreviouslySeenPostsFilter
+
+[`home-mixer/filters/previously_seen_posts_filter.rs:12-40`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/previously_seen_posts_filter.rs#L12-L40)
+
+```rust
+pub struct PreviouslySeenPostsFilter;
+
+async fn filter(
+    &self,
+    query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let bloom_filters = query
+        .bloom_filter_entries
+        .iter()
+        .map(BloomFilter::from_entry)
+        .collect::<Vec<_>>();
+
+    let (removed, kept): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| {
+        get_related_post_ids(c).iter().any(|&post_id| {
+            query.seen_ids.contains(&post_id)
+                || bloom_filters
+                    .iter()
+                    .any(|filter| filter.may_contain(post_id))
+        })
+    });
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Filters out posts the user has already seen. Uses two mechanisms:
+
+1. **Direct `seen_ids`**: The client sends a list of post IDs the user has seen in this session.
+2. **Bloom filters**: Probabilistic data structures that can efficiently check if a post ID was seen in previous sessions without storing the full history.
+
+`get_related_post_ids` returns the tweet ID plus related IDs (retweets, quotes) — if any of these have been seen, the candidate is removed.
+
+### Filter 8: PreviouslyServedPostsFilter
+
+[`home-mixer/filters/previously_served_posts_filter.rs:12-33`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/previously_served_posts_filter.rs#L12-L33)
+
+```rust
+pub struct PreviouslyServedPostsFilter;
+
+fn enable(&self, query: ScoredPostsQuery) -> bool {
+    query.is_bottom_request
+}
+
+async fn filter(
+    &self,
+    query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let (removed, kept): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| {
+        get_related_post_ids(c)
+            .iter()
+            .any(|id| query.served_ids.contains(id))
+    });
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Only enabled for bottom requests (pagination). Filters out posts that were served in previous pages. This prevents re-showing content when the user scrolls down.
+
+### Filter 9: MutedKeywordFilter
+
+[`home-mixer/filters/muted_keyword_filter.rs:12-58`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/muted_keyword_filter.rs#L12-L58)
+
+```rust
+pub struct MutedKeywordFilter {
+    pub tokenizer: Arc<TweetTokenizer>,
+}
+
+async fn filter(
+    &self,
+    query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let muted_keywords = query.user_features.muted_keywords.clone();
+
+    if muted_keywords.is_empty() {
+        return Ok(FilterResult {
+            kept: candidates,
+            removed: vec![],
+        });
+    }
+
+    let tokenized = muted_keywords.iter().map(|k| self.tokenizer.tokenize(k));
+    let token_sequences: Vec<TokenSequence> = tokenized.collect::<Vec<_>>();
+    let user_mutes = UserMutes::new(token_sequences);
+    let matcher = MatchTweetGroup::new(user_mutes);
+
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+
+    for candidate in candidates {
+        let tweet_text_token_sequence = self.tokenizer.tokenize(&candidate.tweet_text);
+        if matcher.matches(&tweet_text_token_sequence) {
+            removed.push(candidate);
+        } else {
+            kept.push(candidate);
+        }
+    }
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Filters out posts containing muted keywords. Tokenizes both the muted keywords and the tweet text, then checks if any muted keyword appears in the tweet. This respects the user's content preferences.
+
+### Filter 10: AuthorSocialgraphFilter
+
+[`home-mixer/filters/author_socialgraph_filter.rs:12-43`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/author_socialgraph_filter.rs#L12-L43)
+
+```rust
+pub struct AuthorSocialgraphFilter;
+
+async fn filter(
+    &self,
+    query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let viewer_blocked_user_ids = query.user_features.blocked_user_ids.clone();
+    let viewer_muted_user_ids = query.user_features.muted_user_ids.clone();
+
+    if viewer_blocked_user_ids.is_empty() && viewer_muted_user_ids.is_empty() {
+        return Ok(FilterResult {
+            kept: candidates,
+            removed: Vec::new(),
+        });
+    }
+
+    let mut kept: Vec<PostCandidate> = Vec::new();
+    let mut removed: Vec<PostCandidate> = Vec::new();
+
+    for candidate in candidates {
+        let author_id = candidate.author_id as i64;
+        let muted = viewer_muted_user_ids.contains(&author_id);
+        let blocked = viewer_blocked_user_ids.contains(&author_id);
+        if muted || blocked {
+            removed.push(candidate);
+        } else {
+            kept.push(candidate);
+        }
+    }
+
+    Ok(FilterResult { kept, removed })
+}
+```
+
+Removes posts from authors the viewer has blocked or muted. This is a fundamental social graph filter — the user explicitly said they don't want to see this person's content.
+
+## Selection and Post-Selection
+
+After scoring, the top candidates are selected and then filtered one more time.
+
+### TopKScoreSelector
+
+The selector sorts candidates by final `score` (descending) and selects the top K. The exact K is configured via `params::RESULT_SIZE` — typically around 50, slightly more than the final feed size to account for post-selection filtering.
+
+### VFFilter — Visibility Filtering
+
+[`home-mixer/filters/vf_filter.rs:12-32`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/vf_filter.rs#L12-L32)
+
+```rust
+pub struct VFFilter;
+
+async fn filter(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let (removed, kept): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| should_drop(&c.visibility_reason));
+
+    Ok(FilterResult { kept, removed })
+}
+
+fn should_drop(reason: &Option<FilteredReason>) -> bool {
+    match reason {
+        Some(FilteredReason::SafetyResult(safety_result)) => {
+            matches!(safety_result.action, Action::Drop(_))
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+```
+
+Runs after selection to minimize calls to the visibility service. Filters out posts with safety violations (spam, violence, deleted content). The `visibility_reason` field is populated by a separate service call (not shown in the open-source code) that evaluates each post against trust and safety policies.
+
+### DedupConversationFilter
+
+[`home-mixer/filters/dedup_conversation_filter.rs:12-57`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/filters/dedup_conversation_filter.rs#L12-L57)
+
+```rust
+pub struct DedupConversationFilter;
+
+async fn filter(
+    &self,
+    _query: &ScoredPostsQuery,
+    candidates: Vec<PostCandidate>,
+) -> Result<FilterResult<PostCandidate>, String> {
+    let mut kept: Vec<PostCandidate> = Vec::new();
+    let mut removed: Vec<PostCandidate> = Vec::new();
+    let mut best_per_convo: HashMap<u64, (usize, f64)> = HashMap::new();
+
+    for candidate in candidates {
+        let conversation_id = get_conversation_id(&candidate);
+        let score = candidate.score.unwrap_or(0.0);
+
+        if let Some((kept_idx, best_score)) = best_per_convo.get_mut(&conversation_id) {
+            if score > *best_score {
+                let previous = std::mem::replace(&mut kept[*kept_idx], candidate);
+                removed.push(previous);
+                *best_score = score;
+            } else {
+                removed.push(candidate);
+            }
+        } else {
+            let idx = kept.len();
+            best_per_convo.insert(conversation_id, (idx, score));
+            kept.push(candidate);
+        }
+    }
+
+    Ok(FilterResult { kept, removed })
+}
+
+fn get_conversation_id(candidate: &PostCandidate) -> u64 {
+    candidate
+        .ancestors
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(candidate.tweet_id as u64)
+}
+```
+
+Keeps only the highest-scored candidate per conversation branch. Uses the `ancestors` array to find the conversation root (the minimum ancestor ID). If multiple candidates belong to the same conversation, only the one with the highest score is kept. This prevents showing multiple replies from the same thread.
+
+## Side Effects: Async Bookkeeping
+
+After the final feed is assembled, side effects run asynchronously in the background. They don't affect the returned feed — they're for bookkeeping.
+
+[`home-mixer/side_effects/cache_request_info_side_effect.rs:12-41`](https://github.com/xai-org/x-algorithm/blob/main/home-mixer/side_effects/cache_request_info_side_effect.rs#L12-L41)
+
+```rust
+pub struct CacheRequestInfoSideEffect {
+    pub strato_client: Arc<dyn StratoClient + Send + Sync>,
+}
+
+fn enable(&self, query: Arc<ScoredPostsQuery>) -> bool {
+    env::var("APP_ENV").unwrap_or_default() == "prod" && !query.in_network_only
+}
+
+async fn run(
+    &self,
+    input: Arc<SideEffectInput<ScoredPostsQuery, PostCandidate>>,
+) -> Result<(), String> {
+    let user_id: i64 = input.query.user_id;
+
+    let post_ids: Vec<i64> = input
+        .selected_candidates
+        .iter()
+        .map(|c| c.tweet_id)
+        .collect();
+
+    let res = self.strato_client.store_request_info(user_id, post_ids).await?;
+    // ... handle response ...
+}
+```
+
+`CacheRequestInfoSideEffect` stores the `user_id` and selected `post_ids` in Strato (a distributed key-value store). This cache is used by `PreviouslyServedPostsFilter` for future pagination requests. The side effect only runs in production and for non-in-network-only requests.
+
+Side effects are spawned into a detached Tokio task ([`candidate-pipeline/candidate_pipeline.rs:319-328`](https://github.com/xai-org/x-algorithm/blob/main/candidate-pipeline/candidate_pipeline.rs#L319-L328)), so they don't block the response. Errors from side effects are discarded — they're best-effort operations.
+
+## The Waterfall: From ~200 to ~40
+
+Putting it all together, here's the candidate count reduction through the pipeline:
+
+```
+~200 candidates (after sourcing)
+  │
+  ├─▶ DropDuplicatesFilter → 195 (removed 5 dupes)
+  ├─▶ CoreDataHydrationFilter → 192 (3 failed hydration)
+  ├─▶ AgeFilter → 185 (7 too old)
+  ├─▶ SelfTweetFilter → 184 (1 was user's own)
+  ├─▶ RetweetDeduplicationFilter → 178 (6 retweet dupes)
+  ├─▶ IneligibleSubscriptionFilter → 176 (2 paywalled)
+  ├─▶ PreviouslySeenPostsFilter → 173 (3 seen)
+  ├─▶ PreviouslyServedPostsFilter → 172 (1 served)
+  ├─▶ MutedKeywordFilter → 170 (2 muted keywords)
+  └─▶ AuthorSocialgraphFilter → 168 (2 blocked/muted)
+      │
+      ▼
+  PhoenixScorer → 18 probabilities per candidate
+      │
+      ▼
+  WeightedScorer → single weighted score per candidate
+      │
+      ▼
+  AuthorDiversityScorer → penalize repeated authors
+      │
+      ▼
+  OONScorer → adjust out-of-network scores
+      │
+      ▼
+  TopKScoreSelector → ~50 candidates
+      │
+      ├─▶ VFFilter → 48 (2 safety violations)
+      └─▶ DedupConversationFilter → 47 (1 conversation dup)
+          │
+          ▼
+  Truncate to RESULT_SIZE → ~40 ranked posts
+```
+
+Each stage has a purpose: filters remove ineligible content, scorers rank what remains, selection picks the best, and post-selection filters ensure safety and variety.
+
+## Key Insights
+
+### Tunable Weights Enable Rapid Experimentation
+
+The `WeightedScorer` weights are configuration parameters, not hardcoded constants. This means X can change feed behavior without retraining the model:
+
+- Increase `REPLY_WEIGHT` to promote conversation-starting posts
+- Decrease `OON_WEIGHT_FACTOR` to show more in-network content
+- Increase `BLOCK_AUTHOR_WEIGHT` to be more conservative about potentially offensive content
+
+A/B testing different weight configurations is trivial — just deploy a new config and measure engagement. No ML training required. This is a powerful lever for product teams.
+
+### Filter Chain is Defensive Programming
+
+The 10 pre-scoring filters represent a philosophy of defense in depth:
+
+- **Data integrity**: `CoreDataHydrationFilter` ensures basic data quality
+- **Freshness**: `AgeFilter` enforces recency
+- **Variety**: `DropDuplicatesFilter`, `RetweetDeduplicationFilter` prevent repetition
+- **User preferences**: `SelfTweetFilter`, `MutedKeywordFilter`, `AuthorSocialgraphFilter` respect explicit user choices
+- **Experience**: `PreviouslySeenPostsFilter`, `PreviouslyServedPostsFilter` keep the feed feeling fresh
+- **Monetization**: `IneligibleSubscriptionFilter` respects paywalls
+
+Each filter is simple and focused. Together, they ensure that only high-quality, relevant candidates reach the expensive ML scoring stage.
+
+### Author Diversity is Simple but Effective
+
+The `AuthorDiversityScorer` uses a simple exponential decay formula, yet it effectively prevents any single author from dominating the feed. The floor ensures that even repeated authors get some visibility, so users don't miss important updates from people they care about.
+
+No complex diversity algorithms are needed — just a mathematical formula that penalizes repetition. The beauty is in its simplicity.
+
+### Side Effects Enable Future Optimizations
+
+Side effects are a clean separation of concerns: feed generation vs. bookkeeping. By caching served posts asynchronously, the system enables efficient pagination without blocking the critical path. Other potential side effects include:
+
+- Logging impressions for analytics
+- Updating user engagement models
+- Triggering downstream workflows (e.g., notifications)
+
+The fire-and-forget model means these operations don't add latency to the user-facing request.
+
+## What This Tells Us About Modern RecSys
+
+X's recommendation algorithm represents a modern approach to recommendation systems at scale:
+
+**LLM architectures replacing feature engineering.** The Grok-based transformer learns relevance directly from engagement history, with zero hand-engineered features. This is a significant departure from traditional systems that rely on manually crafted signals.
+
+**Clean language boundaries.** Rust handles the latency-sensitive serving layer; Python/JAX handles the ML models. Each language is used where it shines, with a clear contract between them.
+
+**Candidate isolation as a pattern.** The attention mask that prevents candidates from attending to each other is a clever trick that enables scoring all candidates in a single forward pass while maintaining score consistency and cacheability.
+
+**Multi-action prediction with tunable weights.** Predicting 19 different engagement actions and combining them with configurable weights allows rapid experimentation and fine-grained control over feed behavior without model retraining.
+
+**Defensive filtering at scale.** The 10 pre-scoring filters represent a layered approach to quality, safety, and user preference enforcement. Each filter is simple, but together they form a robust defense against low-quality or inappropriate content.
+
+This architecture is production-grade, scalable, and surprisingly clean. It shows how modern ML techniques — transformers, learned embeddings, multi-task prediction — can be combined with solid engineering practices to build a recommendation system that serves billions of users.
+
+---
+
+This concludes the 5-part series on the X recommendation algorithm. If you want to explore the code yourself, the repository is [open on GitHub](https://github.com/xai-org/x-algorithm).

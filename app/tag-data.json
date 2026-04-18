@@ -2,7 +2,7 @@
   "graph": 1,
   "embedding": 1,
   "machine-learning": 5,
-  "recommendation-system": 5,
+  "recommendation-system": 6,
   "pytorch": 1,
   "ai": 2,
   "llm": 1,
@@ -14,8 +14,8 @@
   "terraform": 1,
   "deployment": 1,
   "aws": 1,
-  "x-algorithm": 4,
-  "system-design": 2,
-  "rust": 2,
+  "x-algorithm": 5,
+  "system-design": 3,
+  "rust": 3,
   "transformer": 1
 }
