@@ -5,6 +5,7 @@ import { slug } from 'github-slugger'
 import path from 'path'
 import { fromHtmlIsomorphic } from 'hast-util-from-html-isomorphic'
 // Remark packages
+import { visit } from 'unist-util-visit'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { remarkAlert } from 'remark-github-blockquote-alert'
@@ -25,6 +26,21 @@ import rehypePresetMinify from 'rehype-preset-minify'
 import siteMetadata from './data/siteMetadata'
 import { allCoreContent, sortPosts } from 'pliny/utils/contentlayer.js'
 import prettier from 'prettier'
+
+function remarkMermaid() {
+  return (tree) => {
+    visit(tree, 'code', (node, index, parent) => {
+      if (node.lang === 'mermaid') {
+        parent.children.splice(index, 1, {
+          type: 'mdxJsxFlowElement',
+          name: 'Mermaid',
+          attributes: [{ type: 'mdxJsxAttribute', name: 'chart', value: node.value }],
+          children: [],
+        })
+      }
+    })
+  }
+}
 
 const root = process.cwd()
 const isProduction = process.env.NODE_ENV === 'production'
@@ -155,6 +171,7 @@ export default makeSource({
     remarkPlugins: [
       remarkExtractFrontmatter,
       remarkGfm,
+      remarkMermaid,
       remarkCodeTitles,
       remarkMath,
       remarkImgToJsx,
