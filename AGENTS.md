@@ -36,7 +36,6 @@ next.config.js          # Next.js config (CSP, Permissions-Policy headers)
 ## Adding a New Vibe App
 
 1. **Create the route** at `app/vibe-app/[tool-name]/`:
-
    - `layout.tsx` — export `metadata` using `genPageMetadata` from `app/seo`
    - `page.tsx` — add `'use client'` at the top if the component uses hooks or browser APIs
 
@@ -121,3 +120,28 @@ refactor(vibe-app): rename vibe-software to vibe-app
 ## Content (Blog Posts)
 
 Blog posts live in `data/blog/` as `.mdx` files. Contentlayer processes them at build time. See `contentlayer.config.ts` for the schema.
+
+## Sitemap
+
+The sitemap at `app/sitemap.ts` is **fully automatic** for most content:
+
+### Automatically Included (No Manual Update Needed) ✅
+
+- **Blog posts**: Any new `.mdx` file in `data/blog/` is automatically added via Contentlayer's `allBlogs`
+- **Tags**: Dynamically generated from `app/tag-data.json` (auto-updated when tags are used in blog posts)
+- **Vibe apps**: Automatically pulled from `data/vibeAppData.ts` when you register a new app
+
+### Requires Manual Update 🟡
+
+- **New static routes**: If you add a new top-level page (e.g., `/newsletter`, `/contact`), add it to the `mainRoutes` array in `app/sitemap.ts`
+- **Portfolio sub-pages**: If you add a new project under `/portfolio/`, add it to the `portfolioRoutes` array
+
+### SEO Features
+
+The sitemap includes:
+
+- `priority` values (1.0 for homepage → 0.5 for tags/vibe-apps)
+- `changeFrequency` hints (daily/weekly/monthly)
+- `lastModified` dates (pulled from blog post frontmatter or current date)
+
+After deployment, verify the sitemap at: `https://your-domain.com/sitemap.xml`
