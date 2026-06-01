@@ -66,9 +66,11 @@ function ExperienceEntry({ experience, isLast }: { experience: WorkExperience; i
             <h3 className="text-xl font-bold text-gray-900 dark:text-gray-100">
               {experience.role}
             </h3>
-            <p className="text-primary-600 dark:text-primary-400 text-lg font-semibold">
-              {experience.company}
-            </p>
+            {experience.company && (
+              <p className="text-primary-600 dark:text-primary-400 text-lg font-semibold">
+                {experience.company}
+              </p>
+            )}
             {experience.summary && (
               <p className="mt-1 text-sm text-gray-500 italic dark:text-gray-400">
                 {experience.summary}

@@ -16,7 +16,7 @@ export interface WorkExperience {
 
 const experienceData: WorkExperience[] = [
   {
-    company: 'Clearer.io',
+    company: '',
     role: 'Senior ML Engineer',
     period: 'Apr 2023 – Present',
     location: 'Remote',
@@ -33,7 +33,17 @@ const experienceData: WorkExperience[] = [
           'Solved multi-lingual cold-start in non-English, niche categories through curated LLM query validation at scale',
           'Architected distributed search infrastructure across 3 regions with active-active replication, handling 200 QPS peak traffic. Designed sharding strategy partitioning 50M embeddings by tenant, enabling horizontal scaling while maintaining 35ms p99 latency',
         ],
-        tech: ['PyTorch', 'ONNX', 'Qdrant', 'HNSW', 'FastAPI', 'Kubernetes', 'AWS Fargate', 'AWS CDK', 'Docker'],
+        tech: [
+          'PyTorch',
+          'ONNX',
+          'Qdrant',
+          'HNSW',
+          'FastAPI',
+          'Kubernetes',
+          'AWS Fargate',
+          'AWS CDK',
+          'Docker',
+        ],
       },
       {
         name: 'AI Review Summarization',
@@ -56,7 +66,8 @@ const experienceData: WorkExperience[] = [
       },
       {
         name: 'ML Leadership',
-        description: 'Established ML architecture review board and drove company-wide engineering standards.',
+        description:
+          'Established ML architecture review board and drove company-wide engineering standards.',
         highlights: [
           'Established ML architecture review board, creating design patterns adopted by 6 teams',
           'Led RFC process for company-wide feature store implementation, reducing duplicate effort across teams by 40%',
@@ -70,7 +81,8 @@ const experienceData: WorkExperience[] = [
     role: 'Expert Data Scientist',
     period: 'Jun 2020 – Apr 2023',
     location: 'Hanoi, Vietnam',
-    summary: 'Built AutoML platform reducing ML deployment time from weeks to days, serving 10M+ users',
+    summary:
+      'Built AutoML platform reducing ML deployment time from weeks to days, serving 10M+ users',
     projects: [
       {
         name: 'AutoML Recommendation Platform',
