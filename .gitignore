@@ -45,3 +45,7 @@ yarn-error.log*
 
 # Contentlayer
 .contentlayer
+
+# Local parquet datasets (large, not for the repo)
+*.parquet
+data/block_chain/

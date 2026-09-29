@@ -121,6 +121,30 @@ refactor(vibe-app): rename vibe-software to vibe-app
 
 Blog posts live in `data/blog/` as `.mdx` files. Contentlayer processes them at build time. See `contentlayer.config.ts` for the schema.
 
+### Figures and Tables
+
+Every figure (screenshot, image, chart, diagram) and every table in a blog post must have a **name, a number, and a caption**:
+
+- **Name and number**: `Figure N: <short name>` or `Table N: <short name>`. Figures and tables are numbered separately, in order of appearance, starting from 1.
+- **Caption**: one or two sentences saying what the reader should notice, not just repeating the name. Include the data source or conditions when they matter (engine, cache state, sample size).
+- **Placement**: figures get the caption below; tables get it above. Refer to each one in the text by its number (for example, "see Figure 2") before or right after it appears.
+- **Charts**: pass the name and caption to the component (`<BarChart>` takes `title` and `note`); do not leave a chart without a number.
+- **Images**: add descriptive alt text as well, since the caption does not replace it.
+
+Example:
+
+```md
+Table 1: File statistics for one day of Ethereum logs. Snappy-compressed, written by Spark.
+
+| Stat | Value     |
+| ---- | --------- |
+| Rows | 6,626,471 |
+
+![parqeye schema tab](/static/images/example/schema.png)
+
+_Figure 1: Per-column statistics in parqeye. `topics` and `transaction_hash` dominate the file size._
+```
+
 ## Sitemap
 
 The sitemap at `app/sitemap.ts` is **fully automatic** for most content:
