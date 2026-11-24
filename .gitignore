@@ -49,3 +49,8 @@ yarn-error.log*
 # Local parquet datasets (large, not for the repo)
 *.parquet
 data/block_chain/
+
+# Cloudflare Workers
+/.open-next/
+/.wrangler/
+.dev.vars*
