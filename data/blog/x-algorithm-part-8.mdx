@@ -1,0 +1,32 @@
+---
+title: 'X Algorithm Part 8: How a Phoenix Score Becomes a Feed Position'
+date: '2026-11-22'
+tags: ['x-algorithm', 'recommendation-system', 'system-design', 'rust']
+draft: false
+summary: 'Follow a post from predicted actions through the value model, diversity reranking, and the mixer that assembles the For You feed.'
+authors: ['default']
+---
+
+[Part 5](/blog/x-algorithm-part-5) traced the four scorers in the January release. The August update made the scoring weights public, and the November pipeline puts more decisions behind the value-model and reranking interfaces. A post now gives us a trail through the public code from predicted actions to the score that orders posts to the position after Home Mixer blends in other feed items. [August release notes](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#august-13th-2026) · [November post pipeline](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/candidate_pipeline/phoenix_candidate_pipeline.rs)
+
+## A weight applies to a prediction for one viewer
+
+Phoenix predicts several actions and continuous quantities for each viewer and post. A score can combine a probability of liking, a probability of reporting, and an estimate of time spent. In the additive path, the value model multiplies each prediction by its weight and sums the terms. A post's raw counts may be available elsewhere in the pipeline. The inputs to these weighted terms are predictions for the request. [August 14 explanation](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#august-14th-2026) · [Value-model scoring](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/xai-value-model/scoring.rs)
+
+Imagine a toy model with weights of +1 for a like and −10 for a report. For one viewer, a post's predictions of 20% and 1% contribute `0.20 − 0.10 = 0.10`. For another viewer, predictions of 4% and 2% contribute `0.04 − 0.20 = −0.16`. The post can have the same public engagement counts in both requests. The score changes because the predictions change. These example weights are invented to show the arithmetic.
+
+The November 21 diff shows why the scoring mode matters too. In the multiplicative mode, the code moved two video-continuation terms into the engagement sum and left the time factor based on dwell time. Moving a term between factors can change how it interacts with other predictions even when its individual weight stays fixed. This is a change to a particular scoring branch in the source. The diff gives no traffic share for that branch. [November 21 scoring changes](https://github.com/xai-org/x-algorithm/commit/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3) · [Current fusion functions](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/xai-value-model/scoring.rs)
+
+## Reranking can account for neighboring posts
+
+Home Mixer's `VMRanker` prepares local scores, including a cold-start adjustment where one applies. It can reuse a ranking response attached to the candidates or call the VM Ranker service. If the call fails, it can return the locally computed scores. If a response leaves out a candidate, that candidate retains its local score. The service can compute the value model and can apply a diversity step when the relevant configuration and runtime context enable it. [Home Mixer reranking scorer](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/scorers/vm_ranker.rs) · [Reranking service](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/vm-ranker/scoring/mod.rs)
+
+One diversity method here is a determinantal point process, or DPP. It uses embeddings to compare posts and favors selections that combine a high score with less similarity. If the top two candidates cover the same match with nearly identical clips, a third candidate with a slightly lower score can move up because it adds something different. A configured history window can also bring recently served posts into that comparison. This is a separate decision from the transformer scoring each candidate against the viewer's history. [DPP implementation](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/vm-ranker/scoring/dpp_model.rs)
+
+## Home Mixer builds the page after ranking the posts
+
+The post pipeline selects candidates and applies post-selection filters. The outer `ForYouCandidatePipeline` takes the resulting posts as one source and collects other feed items, including ads, prompts, and Who to Follow modules. Its blender chooses an ad-placement strategy and inserts modules into the feed. A post's position on screen therefore reflects both the ordering among posts and the placement of the other items. [Post pipeline](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/candidate_pipeline/phoenix_candidate_pipeline.rs) · [Blending pipeline](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/candidate_pipeline/for_you_candidate_pipeline.rs) · [Blender selector](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/selectors/blender_selector.rs)
+
+When reading a scoring change on GitHub, the repository's own example of the bidirectional-follow boost shows what to check. Follow the data that sets the feature, the parameter that enables or scales it, and the scorer that consumes it. The checked-in defaults provide a reference point. Feature switches and the applicable request path determine what actually runs for a viewer. [Configuration notes](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#experiments-and-configuration) · [Bidirectional-follow example](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/docs/BIDIRECTIONAL_BOOST_CHANGE.md)
+
+[Part 9](/blog/x-algorithm-part-9) examines another reason a post high in the ranking can disappear before blending. Visibility rules evaluate the post, its author, and the viewer's context.

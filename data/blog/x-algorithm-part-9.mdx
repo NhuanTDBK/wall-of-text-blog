@@ -1,0 +1,34 @@
+---
+title: 'X Algorithm Part 9: Why a Ranked Post Can Still Disappear'
+date: '2026-11-22'
+tags: ['x-algorithm', 'recommendation-system', 'system-design', 'rust']
+draft: false
+summary: 'Trace X’s public visibility path from labels to per-viewer decisions, then see what the Under the Hood report can tell an account owner.'
+authors: ['default']
+---
+
+The January release gave [Part 5](/blog/x-algorithm-part-5) a place to point when a selected post disappeared. Home Mixer called a visibility service and acted on the result. The August release opened up much of the code behind that call. It shows how systems generate labels, how rules interpret them for a particular request, and how the Under the Hood pilot reports some of those labels back to account owners. [August 13 release notes](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#august-13th-2026) · [November 21 snapshot](https://github.com/xai-org/x-algorithm/commit/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3)
+
+## A label becomes an input to a rule
+
+The public labeling path starts in several places. Grox classifies content and produces representations of posts. Scarecrow uses Botmaker rules to apply labels in response to events. Account-level systems can add signals of their own. Visibility filtering then considers the available labels alongside request context such as the viewer's relationship to the author. A label can matter in one context and have a different effect in another. The rule catalog includes drop rules specific to recommendations from accounts the viewer does not follow. [Labeling architecture](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#labeling-path) · [Visibility rule levels](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/visibility-filtering/rules/levels.rs) · [Rule definitions](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/visibility-filtering/rules/tweet_rules.rs)
+
+For example, a recommendation-specific rule may remove a labeled post when it reaches someone who does not follow the author. A follower's request can still pass that rule, subject to the other checks. You need the label, the applicable rule, and the viewer context to explain the difference.
+
+## Home Mixer checks related posts too
+
+After selection, Home Mixer's visibility hydrator obtains decisions for the candidate and relevant related posts. The primary filter removes candidates with drop or tombstone actions, among the actions it treats as removal. An interstitial stays in the candidate list at this step. An interstitial is a warning or screen shown before the content. A separate ancillary filter can remove the selected item because of a visibility decision on a parent, quoted, or reposted item. [Visibility hydrator](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/candidate_hydrators/vf_candidate_hydrator.rs) · [Primary filter](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/filters/vf_filter.rs) · [Related-post filter](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/filters/ancillary_vf_filter.rs)
+
+Consider a quote post that scored well on its own. If the quoted post receives a drop decision in the viewer's context, that decision can remove the whole candidate after scoring. Debugging the disposition of the quote requires following both post IDs through the visibility path.
+
+## What the account report shows
+
+The Under the Hood pilot gives account owners a view of visibility-impacting labels on their account and posts. The public jobs collect label data, the report groups it by reporting period, and the UI can show measures such as the share of posts or days associated with a label. The page can also offer a JSON download. The September 18 update says the report added legally required visibility limits, including the country when a post is withheld there. These aggregates let an account owner see that a label was present during a period. A particular viewer's feed position still depends on the request, candidate pool, scores, and rules. [September 18 update](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#september-18th-2026) · [Report data and aggregation](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/under-the-hood/strato/columns/underTheHoodReport.strato) · [Report interface](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/under-the-hood/jetfuel/routes/report.tsx)
+
+The November 21 commit adds a related request-path change. When both relevant feature switches are enabled, Home Mixer can load a viewer's setting for the Under the Hood feed frame. The server uses that setting when deciding whether to insert the frame. The new setting gate defaults to off in the checked-in parameter file. The frame insertion and the account report live in different code paths. [November 21 diff](https://github.com/xai-org/x-algorithm/commit/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3) · [Setting lookup](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/query_hydrators/under_the_hood_setting_query_hydrator.rs) · [Feed response](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/for_you_server.rs) · [Parameter defaults](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/home-mixer/params/param.rs)
+
+## A filter can disappear when its purpose expires
+
+X's August notes describe a Brazil election filter that excluded recommendations from specified accounts unless the viewer followed them. X's October 26 note says it removed that filter after the election. The October 28 GitHub commit records the repository change. The example shows why an audit needs a date as well as a rule name. It also shows why removing one filter leaves other visibility checks in place. [August 14 and October 26 notes](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#notable-updates) · [October 28 code change](https://github.com/xai-org/x-algorithm/commit/5ed796374ea48ee26058aab66ab10c266bea2bef)
+
+To trace a missing post in the public code, start with the three questions this series follows. Did a source return it? Where did scoring and selection place it? What did the applicable visibility rules decide for that request? The release gives readers more of the code for each step. It also documents the deployment details, prompts, and some rules outside the public repository. [Release scope and omissions](https://github.com/xai-org/x-algorithm/blob/269340ce2eb8ca785bafa4f2c17a2e8b752bccd3/README.md#whats-not-in-this-repo)
